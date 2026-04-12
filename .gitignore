@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Secrets
+.env
+
+# MT5 compiled binaries
+*.ex5
+
+# PDFs
+*.pdf
+
+# OS
+.DS_Store
+Thumbs.db
