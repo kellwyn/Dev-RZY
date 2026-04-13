@@ -13,10 +13,22 @@
 //|   8. Bollinger Bands context filter                             |
 //|   9. Structure count — early = strongest, 4th+ = exhaustion     |
 //|  10. Invalidation: close beyond the trendline level             |
+//|                                                                  |
+//|─────────────────── VERSION HISTORY ─────────────────────────────|
+//|  v1.00  2026-04-13  — Initial release (baseline)               |
+//|    · 10-rule Measured Move Trend framework                      |
+//|    · Manual alert / Auto-execute modes                          |
+//|    · Forward-side-only swing high/low detection                 |
+//|    · Bollinger Bands context label + optional entry filter      |
+//|    · Key level proximity filter (ATH/ATL, W1/MN1/H1)           |
+//|    · Trend leg + pullback strength gates (pips + Fib %)        |
+//|    · Risk-based lot sizing (% of balance)                       |
+//|    · Chart lines: Entry / Stop Loss / Target                    |
+//|    · Gap guard — skips bar if open outside prior bar range      |
 //+------------------------------------------------------------------+
 #property copyright "Marci Silfrain Strategy EA"
 #property version   "1.00"
-#property description "Measured Move Trend Strategy — Little RZY Detector"
+#property description "Measured Move Trend Strategy — Little RZY Detector v1.00"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -31,10 +43,22 @@ input double InpRiskPercent    = 1.0;       // Risk per trade (% of balance)
 input double InpMinRR          = 1.5;       // Minimum risk:reward ratio
 
 input group "=== Strategy Parameters ==="
-input int    InpSwingLookback  = 3;         // Bars each side for swing detection
+input int    InpSwingLookback  = 3;         // Bars (forward side only) for swing detection
 input int    InpBBPeriod       = 20;        // Bollinger Bands period
 input double InpBBDeviation    = 2.0;       // Bollinger Bands std deviation
 input int    InpCandleCount    = 100;       // Historical candles to analyse
+
+input group "=== Bollinger Bands Filter ==="
+input bool   InpUseBBFilter    = false;     // Enable: SHORT only near/beyond upper band; LONG only near/beyond lower band
+
+input group "=== Key Level Filter ==="
+input bool   InpUseKeyLevelFilter = false;  // Block trades near ATH/ATL, Monthly/Weekly H/L, H1 S/R zones
+input double InpKeyLevelPips      = 50.0;   // Proximity buffer around key levels (pips)
+
+input group "=== Trend & Pullback Filter ==="
+input double InpMinTrendPips    = 15.0;     // Min impulse leg (pips) — move must be large enough
+input double InpMinPullbackPct  = 25.0;     // Min pullback retracement % of trend leg
+input double InpMaxPullbackPct  = 70.0;     // Max pullback retracement % of trend leg
 
 input group "=== Trade Settings ==="
 input int    InpMagicNumber    = 20260412;  // EA identifier
@@ -112,14 +136,23 @@ bool HasOpenPosition()
 void RunStrategy()
 {
     //── Fetch completed OHLC (pos=1 skips forming bar) ─────────────
-    double highs[], lows[], closes[];
+    double highs[], lows[], closes[], opens[];
     ArraySetAsSeries(highs,  true);
     ArraySetAsSeries(lows,   true);
     ArraySetAsSeries(closes, true);
+    ArraySetAsSeries(opens,  true);
 
     if(CopyHigh (_Symbol, PERIOD_CURRENT, 1, InpCandleCount, highs)  < InpCandleCount) return;
     if(CopyLow  (_Symbol, PERIOD_CURRENT, 1, InpCandleCount, lows)   < InpCandleCount) return;
     if(CopyClose(_Symbol, PERIOD_CURRENT, 1, InpCandleCount, closes) < InpCandleCount) return;
+    if(CopyOpen (_Symbol, PERIOD_CURRENT, 1, InpCandleCount, opens)  < InpCandleCount) return;
+
+    // Gap guard: the most recently completed bar must not have opened outside the
+    // prior bar's high-low range.  Gaps signal session breaks, news spikes, or
+    // illiquid conditions — measured-move entries in a gap are unreliable.
+    //   opens[0] = open of bar 1  (most recent complete)
+    //   highs[1] / lows[1] = high / low of bar 2  (the bar before it)
+    if(opens[0] > highs[1] || opens[0] < lows[1]) return;
 
     //── Bollinger Bands ─────────────────────────────────────────────
     double bbUpper[], bbMiddle[], bbLower[];
@@ -143,13 +176,13 @@ void RunStrategy()
     FindSwings(highs, lows, InpCandleCount, InpSwingLookback,
                shIdx, shPx, slIdx, slPx);
 
-    if(ArraySize(shIdx) < 3 || ArraySize(slIdx) < 3) return;
+    if(ArraySize(shIdx) < 1 || ArraySize(slIdx) < 1) return;  // need at least one swing each side
 
     //── Rule 1: identify the trend ──────────────────────────────────
     // Arrays are AsSeries: index 0 = most recent swing point
     // Downtrend: shPx[0] < shPx[1] < shPx[2]  (recent lows older)
     // Uptrend  : shPx[0] > shPx[1] > shPx[2]
-    int trend = DetectTrend(shPx, slPx);
+    int trend = DetectTrend(shPx, slPx, closes);
     if(trend == 0) return;   // SIDEWAYS — no trade
 
     int structCount;
@@ -168,7 +201,7 @@ void RunStrategy()
 
         // Rule 2/3: pullback high = highest high in bars MORE RECENT than anchor
         // (AsSeries: indices 0..anchorIdx-1 are more recent)
-        if(anchorIdx < 2) return;
+        if(anchorIdx < 1) return;
 
         double phPx  = 0.0;
         int    phBar = -1;
@@ -181,13 +214,32 @@ void RunStrategy()
         // Rule 10: pullback must not exceed prior confirmed swing high
         if(ArraySize(shIdx) > 0 && phPx >= shPx[0]) return;
 
+        // ── Gate: Trend & Pullback Strength ──────────────────────────────
+        // Trend leg   : prior swing high → anchor low   (the full impulse drop)
+        // Pullback leg: anchor low → pullback high      (the retracement)
+        // Ratio       : pullback / trend × 100          (Fibonacci-style %)
+        //
+        // trendPips  — ensures the move is large enough to be worth trading
+        // pullbackPct — 25-70% is the measured-move sweet spot:
+        //   < 25%  → barely a pullback; no structure to anchor the trendline
+        //   > 70%  → retracement is eating the trend; reversal risk rises sharply
+        double _pipVal      = ((_Digits == 5 || _Digits == 3) ? _Point * 10.0 : _Point);
+        double _trendLeg    = shPx[0] - anchorPx;
+        double _pullbackLeg = phPx    - anchorPx;
+        double trendPips    = (_pipVal > 0) ? _trendLeg / _pipVal : 0.0;
+        double pullbackPct  = (_trendLeg > 0) ? (_pullbackLeg / _trendLeg * 100.0) : 0.0;
+        if(trendPips   < InpMinTrendPips)   return;   // impulse too small to trade
+        if(pullbackPct < InpMinPullbackPct) return;   // retracement too shallow
+        if(pullbackPct > InpMaxPullbackPct) return;   // pullback too deep — trend weakening
+
         // Rule 7: entry conditions
         bool inZone = (curPrice > anchorPx && curPrice < phPx);
 
+        // Use HIGHS not closes — a wick rejection closes below phPx but the high touches it
         bool visitedPeak = false;
         int  checkBars   = MathMin(8, anchorIdx);
         for(int i = 0; i < checkBars; i++)
-            if(closes[i] >= phPx * 0.97) { visitedPeak = true; break; }
+            if(highs[i] >= phPx * 0.97) { visitedPeak = true; break; }
 
         double recentHi = 0;
         for(int i = 0; i < 5; i++) recentHi = MathMax(recentHi, highs[i]);
@@ -212,10 +264,19 @@ void RunStrategy()
         string bbPos    = BBLabel(curPrice, curUpper, curMiddle, curLower);
         string strength = SignalStrength("SHORT", bbPos, structCount);
 
+        // Bollinger Bands filter: require price near/beyond upper band for SHORT
+        // (extended into upper BB = overextended, higher reversal probability)
+        if(InpUseBBFilter && bbPos != "NEAR_UPPER" && bbPos != "BEYOND_UPPER") return;
+
+        // Key level filter: block SHORT if price is within InpKeyLevelPips of a
+        // major support zone (ATL, Monthly/Weekly low, H1 swing low)
+        if(InpUseKeyLevelFilter && IsNearKeyLevel(entryPx, "SHORT")) return;
+
         string summary = BuildSummary("SHORT", entryPx, slPxVal, targetPx, rr,
                                       anchorPx, phPx, measuredDist,
                                       curUpper, curMiddle, curLower,
-                                      bbPos, structCount, strength);
+                                      bbPos, structCount, strength,
+                                      trendPips, pullbackPct);
 
         DrawLevels(entryPx, slPxVal, targetPx, "SHORT");
         Comment(summary);
@@ -250,7 +311,7 @@ void RunStrategy()
         int    anchorIdx = shIdx[0];
         double anchorPx  = shPx[0];
 
-        if(anchorIdx < 2) return;
+        if(anchorIdx < 1) return;
 
         // Pullback low = lowest low MORE RECENT than anchor
         double plPx  = DBL_MAX;
@@ -264,12 +325,25 @@ void RunStrategy()
         // Rule 10: pullback must not break below prior confirmed swing low
         if(ArraySize(slIdx) > 0 && plPx <= slPx[0]) return;
 
+        // ── Gate: Trend & Pullback Strength ──────────────────────────────
+        // Trend leg   : prior swing low → anchor high   (the full impulse rise)
+        // Pullback leg: anchor high → pullback low      (the retracement)
+        double _pipVal      = ((_Digits == 5 || _Digits == 3) ? _Point * 10.0 : _Point);
+        double _trendLeg    = anchorPx - slPx[0];
+        double _pullbackLeg = anchorPx - plPx;
+        double trendPips    = (_pipVal > 0) ? _trendLeg / _pipVal : 0.0;
+        double pullbackPct  = (_trendLeg > 0) ? (_pullbackLeg / _trendLeg * 100.0) : 0.0;
+        if(trendPips   < InpMinTrendPips)   return;
+        if(pullbackPct < InpMinPullbackPct) return;
+        if(pullbackPct > InpMaxPullbackPct) return;
+
         bool inZone = (curPrice > plPx && curPrice < anchorPx);
 
+        // Use LOWS not closes — a wick bounce has a low at plPx but closes above it
         bool visitedTrough = false;
         int  checkBars     = MathMin(8, anchorIdx);
         for(int i = 0; i < checkBars; i++)
-            if(closes[i] <= plPx * 1.03) { visitedTrough = true; break; }
+            if(lows[i] <= plPx * 1.03) { visitedTrough = true; break; }
 
         double recentLo = DBL_MAX;
         for(int i = 0; i < 5; i++) recentLo = MathMin(recentLo, lows[i]);
@@ -292,10 +366,18 @@ void RunStrategy()
         string bbPos    = BBLabel(curPrice, curUpper, curMiddle, curLower);
         string strength = SignalStrength("LONG", bbPos, structCount);
 
+        // Bollinger Bands filter: require price near/beyond lower band for LONG
+        if(InpUseBBFilter && bbPos != "NEAR_LOWER" && bbPos != "BEYOND_LOWER") return;
+
+        // Key level filter: block LONG if price is within InpKeyLevelPips of a
+        // major resistance zone (ATH, Monthly/Weekly high, H1 swing high)
+        if(InpUseKeyLevelFilter && IsNearKeyLevel(entryPx, "LONG")) return;
+
         string summary = BuildSummary("LONG", entryPx, slPxVal, targetPx, rr,
                                       anchorPx, plPx, measuredDist,
                                       curUpper, curMiddle, curLower,
-                                      bbPos, structCount, strength);
+                                      bbPos, structCount, strength,
+                                      trendPips, pullbackPct);
 
         DrawLevels(entryPx, slPxVal, targetPx, "LONG");
         Comment(summary);
@@ -336,10 +418,13 @@ void FindSwings(
     int limit = bars - n;
     for(int i = n; i < limit; i++)
     {
-        // Swing high: higher than n bars on both sides
+        // Swing high: higher than n bars on the FORWARD side only (bars that came after
+        // the pivot in real time = smaller AsSeries indices = i-j).
+        // The older/left side (i+j) is intentionally skipped: prior structure such as a
+        // preceding impulse spike should not disqualify the current pullback high.
         bool isHigh = true;
         for(int j = 1; j <= n && isHigh; j++)
-            if(highs[i] < highs[i - j] || highs[i] < highs[i + j]) isHigh = false;
+            if(highs[i] < highs[i - j]) isHigh = false;
         if(isHigh)
         {
             int sz = ArraySize(shIdxOut);
@@ -349,10 +434,10 @@ void FindSwings(
             shPxOut[sz]  = highs[i];
         }
 
-        // Swing low: lower than n bars on both sides
+        // Swing low: lower than n bars on the FORWARD side only (same rationale as above)
         bool isLow = true;
         for(int j = 1; j <= n && isLow; j++)
-            if(lows[i] > lows[i - j] || lows[i] > lows[i + j]) isLow = false;
+            if(lows[i] > lows[i - j]) isLow = false;
         if(isLow)
         {
             int sz = ArraySize(slIdxOut);
@@ -365,32 +450,129 @@ void FindSwings(
 }
 
 //+------------------------------------------------------------------+
-//| Rule 1 — Detect trend from swing arrays (AsSeries: 0 = recent) |
-//| Downtrend: shPx[0] < shPx[1]  (most recent high is LOWER)      |
-//| Uptrend  : shPx[0] > shPx[1]  (most recent high is HIGHER)     |
+//| Rule 1 — Detect trend using 3-candle close momentum             |
+//| SHORT (-1): 3 most recent closes declining AND all below the    |
+//|             most recent confirmed swing high                     |
+//| LONG  (+1): 3 most recent closes rising AND all above the       |
+//|             most recent confirmed swing low                      |
+//|                                                                  |
+//| Rationale: the pullback phase may contain a local higher-high   |
+//| (the pullback high itself), so strict LH+LL cascade is too      |
+//| rigid. Three consecutive closes in the trend direction, bounded  |
+//| by the key swing level, is sufficient to confirm bias.          |
 //| Returns: -1=DOWN, 1=UP, 0=SIDEWAYS                              |
 //+------------------------------------------------------------------+
-int DetectTrend(const double &shPx[], const double &slPx[])
+int DetectTrend(const double &shPx[], const double &slPx[], const double &closes[])
 {
-    int minPts = 3;
-    if(ArraySize(shPx) < minPts || ArraySize(slPx) < minPts) return 0;
+    if(ArraySize(shPx) < 1 || ArraySize(slPx) < 1) return 0;
+    if(ArraySize(closes) < 3) return 0;
 
-    bool shDown = true, slDown = true;
-    bool shUp   = true, slUp   = true;
+    // SHORT: closes falling  AND  all three below the prior swing high (resistance)
+    bool recentDown    = (closes[0] < closes[1] && closes[1] < closes[2]);
+    bool belowResist   = (closes[0] < shPx[0] && closes[1] < shPx[0] && closes[2] < shPx[0]);
 
-    for(int i = 0; i < minPts - 1; i++)
+    // LONG: closes rising  AND  all three above the prior swing low (support)
+    bool recentUp      = (closes[0] > closes[1] && closes[1] > closes[2]);
+    bool aboveSupport  = (closes[0] > slPx[0] && closes[1] > slPx[0] && closes[2] > slPx[0]);
+
+    if(recentDown && belowResist) return -1;
+    if(recentUp   && aboveSupport) return  1;
+    return 0;
+}
+
+//+------------------------------------------------------------------+
+//| Key level proximity check (used by InpUseKeyLevelFilter gate)   |
+//|                                                                  |
+//| SHORT → returns true (block trade) when entry is within buffer  |
+//|         of: ATL, Monthly/Weekly lows, H1 swing lows (support)   |
+//| LONG  → returns true when entry is within buffer of:            |
+//|         ATH, Monthly/Weekly highs, H1 swing highs (resistance)  |
+//|                                                                  |
+//| H1 swing detection uses 3-bar lookback on BOTH sides — higher   |
+//| timeframe pivots should be fully confirmed on both sides.        |
+//+------------------------------------------------------------------+
+bool IsNearKeyLevel(double price, string dir)
+{
+    double pipVal = ((_Digits == 5 || _Digits == 3) ? _Point * 10.0 : _Point);
+    double buf    = InpKeyLevelPips * pipVal;
+
+    // ── Weekly high / low (last 52 weeks) ───────────────────────────
     {
-        // Downtrend: each successive element (older) must be HIGHER
-        if(shPx[i] >= shPx[i + 1]) shDown = false;
-        if(slPx[i] >= slPx[i + 1]) slDown = false;
-        // Uptrend: each successive element (older) must be LOWER
-        if(shPx[i] <= shPx[i + 1]) shUp = false;
-        if(slPx[i] <= slPx[i + 1]) slUp = false;
+        double wH[], wL[];
+        int n = MathMin(52, (int)iBars(_Symbol, PERIOD_W1));
+        if(n > 0 &&
+           CopyHigh(_Symbol, PERIOD_W1, 0, n, wH) == n &&
+           CopyLow (_Symbol, PERIOD_W1, 0, n, wL) == n)
+        {
+            double wkHigh = wH[ArrayMaximum(wH, 0, WHOLE_ARRAY)];
+            double wkLow  = wL[ArrayMinimum(wL, 0, WHOLE_ARRAY)];
+            if(dir == "SHORT" && MathAbs(price - wkLow)  <= buf) return true;
+            if(dir == "LONG"  && MathAbs(price - wkHigh) <= buf) return true;
+        }
     }
 
-    if(shDown && slDown) return -1;
-    if(shUp   && slUp)   return  1;
-    return 0;
+    // ── Monthly high / low (last 12 months) ─────────────────────────
+    {
+        double mH[], mL[];
+        int n = MathMin(12, (int)iBars(_Symbol, PERIOD_MN1));
+        if(n > 0 &&
+           CopyHigh(_Symbol, PERIOD_MN1, 0, n, mH) == n &&
+           CopyLow (_Symbol, PERIOD_MN1, 0, n, mL) == n)
+        {
+            double mnHigh = mH[ArrayMaximum(mH, 0, WHOLE_ARRAY)];
+            double mnLow  = mL[ArrayMinimum(mL, 0, WHOLE_ARRAY)];
+            if(dir == "SHORT" && MathAbs(price - mnLow)  <= buf) return true;
+            if(dir == "LONG"  && MathAbs(price - mnHigh) <= buf) return true;
+        }
+    }
+
+    // ── All-time high / low (up to 520 weekly bars ≈ 10 years) ─────
+    {
+        double aH[], aL[];
+        int n = MathMin(520, (int)iBars(_Symbol, PERIOD_W1));
+        if(n > 0 &&
+           CopyHigh(_Symbol, PERIOD_W1, 0, n, aH) == n &&
+           CopyLow (_Symbol, PERIOD_W1, 0, n, aL) == n)
+        {
+            double ath = aH[ArrayMaximum(aH, 0, WHOLE_ARRAY)];
+            double atl = aL[ArrayMinimum(aL, 0, WHOLE_ARRAY)];
+            if(dir == "SHORT" && MathAbs(price - atl) <= buf) return true;
+            if(dir == "LONG"  && MathAbs(price - ath) <= buf) return true;
+        }
+    }
+
+    // ── H1 swing highs (resistance) and swing lows (support) ────────
+    // Uses 200 H1 bars (~8 days). Both-sides lookback is intentional:
+    // H1 pivots should be confirmed on each side for S/R reliability.
+    {
+        double h1H[], h1L[];
+        int    h1Bars = 200;
+        int    lb     = 3;
+        if(CopyHigh(_Symbol, PERIOD_H1, 1, h1Bars, h1H) == h1Bars &&
+           CopyLow (_Symbol, PERIOD_H1, 1, h1Bars, h1L) == h1Bars)
+        {
+            // Arrays returned oldest-first (not AsSeries)
+            for(int i = lb; i < h1Bars - lb; i++)
+            {
+                if(dir == "LONG")   // check H1 swing highs = resistance
+                {
+                    bool isRes = true;
+                    for(int j = 1; j <= lb && isRes; j++)
+                        if(h1H[i] <= h1H[i - j] || h1H[i] <= h1H[i + j]) isRes = false;
+                    if(isRes && MathAbs(price - h1H[i]) <= buf) return true;
+                }
+                if(dir == "SHORT")  // check H1 swing lows = support
+                {
+                    bool isSup = true;
+                    for(int j = 1; j <= lb && isSup; j++)
+                        if(h1L[i] >= h1L[i - j] || h1L[i] >= h1L[i + j]) isSup = false;
+                    if(isSup && MathAbs(price - h1L[i]) <= buf) return true;
+                }
+            }
+        }
+    }
+
+    return false;
 }
 
 //+------------------------------------------------------------------+
@@ -465,11 +647,19 @@ string BuildSummary(
     double entry, double sl, double tp, double rr,
     double anchor, double pullback, double dist,
     double bbU, double bbM, double bbL, string bbPos,
-    int structCount, string strength)
+    int structCount, string strength,
+    double trendPips, double pullbackPct)
 {
     string anchorLabel   = (dir == "SHORT") ? "Swing Low (anchor)"    : "Swing High (anchor)";
     string pullbackLabel = (dir == "SHORT") ? "Pullback High (trend.)" : "Pullback Low (trend.)";
     string trendLabel    = (dir == "SHORT") ? "DOWNTREND — LH + LL"   : "UPTREND — HH + HL";
+
+    // Ratio label: how much of the trend leg has been retraced
+    string pbZone;
+    if     (pullbackPct < 38.0) pbZone = "shallow (<38%) — strong trend";
+    else if(pullbackPct < 50.0) pbZone = "38-50% Fib zone — normal";
+    else if(pullbackPct < 62.0) pbZone = "50-62% Fib zone — deep but valid";
+    else                        pbZone = "62-70% — near limit, caution";
 
     string s = "";
     s += "═══ MARCI SILFRAIN — MEASURED MOVE TREND ═══\n";
@@ -486,6 +676,11 @@ string BuildSummary(
     s += StringFormat("[OK] Rule 8  — BB position: %s  U=%.5f M=%.5f L=%.5f\n", bbPos, bbU, bbM, bbL);
     s += StringFormat("[OK] Rule 9  — Structure #%d in trend  (1-2=strongest / 4+=exhaustion)\n", structCount);
     s += StringFormat("[OK] Rule 10 — Invalidated if price closes beyond: %s\n\n", DoubleToString(sl, _Digits));
+
+    s += "TREND & PULLBACK STRENGTH:\n";
+    s += StringFormat("  Impulse leg : %.1f pips  (min required: %.0f)\n", trendPips, InpMinTrendPips);
+    s += StringFormat("  Retracement : %.1f%%  — %s\n",                    pullbackPct, pbZone);
+    s += StringFormat("  Ratio (leg/retrace): 1:%.2f\n\n",                 pullbackPct / 100.0);
 
     s += "TRADE LEVELS:\n";
     s += StringFormat("  Entry      : %s\n",  DoubleToString(entry, _Digits));
