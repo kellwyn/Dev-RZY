@@ -26,8 +26,11 @@
 //|    · Chart lines: Entry / Stop Loss / Target                    |
 //|    · Gap guard — skips bar if open outside prior bar range      |
 //|                                                                  |
-//|  v1.01  2026-04-14  — [IN DEVELOPMENT]                         |
-//|    · TBD — fine-tuning & enhancements                          |
+//|  v1.01  2026-04-14  — Big Move Cooldown filter                  |
+//|    · Block SHORT for N bars after price drops >= X%            |
+//|    · Block LONG  for N bars after price rises >= X%            |
+//|    · Configurable threshold (1-10%+) and cooldown bar count    |
+//|    · Toggle on/off via InpUseBigMoveCooldown                   |
 //+------------------------------------------------------------------+
 #property copyright "Marci Silfrain Strategy EA"
 #property version   "1.01"
@@ -62,6 +65,12 @@ input group "=== Trend & Pullback Filter ==="
 input double InpMinTrendPips    = 15.0;     // Min impulse leg (pips) — move must be large enough
 input double InpMinPullbackPct  = 25.0;     // Min pullback retracement % of trend leg
 input double InpMaxPullbackPct  = 70.0;     // Max pullback retracement % of trend leg
+
+input group "=== Big Move Cooldown Filter ==="
+input bool   InpUseBigMoveCooldown  = true;  // Enable cooldown after a large single-bar move
+input double InpBigMovePct          = 1.0;   // Threshold: bar move >= this % triggers cooldown (1-10%+)
+                                              //   Forex majors: 1-2%  |  Indices/Crypto: 3-5%+
+input int    InpBigMoveCooldownBars = 20;    // Bars to block new trades after a big move is detected
 
 input group "=== Trade Settings ==="
 input int    InpMagicNumber    = 20260412;  // EA identifier
@@ -275,6 +284,10 @@ void RunStrategy()
         // major support zone (ATL, Monthly/Weekly low, H1 swing low)
         if(InpUseKeyLevelFilter && IsNearKeyLevel(entryPx, "SHORT")) return;
 
+        // Big move cooldown: block SHORT if a bar dropped >= InpBigMovePct%
+        // within the last InpBigMoveCooldownBars bars (move already exhausted)
+        if(IsBigMoveCooldown("SHORT", opens, closes, InpCandleCount)) return;
+
         string summary = BuildSummary("SHORT", entryPx, slPxVal, targetPx, rr,
                                       anchorPx, phPx, measuredDist,
                                       curUpper, curMiddle, curLower,
@@ -375,6 +388,10 @@ void RunStrategy()
         // Key level filter: block LONG if price is within InpKeyLevelPips of a
         // major resistance zone (ATH, Monthly/Weekly high, H1 swing high)
         if(InpUseKeyLevelFilter && IsNearKeyLevel(entryPx, "LONG")) return;
+
+        // Big move cooldown: block LONG if a bar rose >= InpBigMovePct%
+        // within the last InpBigMoveCooldownBars bars (move already exhausted)
+        if(IsBigMoveCooldown("LONG", opens, closes, InpCandleCount)) return;
 
         string summary = BuildSummary("LONG", entryPx, slPxVal, targetPx, rr,
                                       anchorPx, plPx, measuredDist,
@@ -481,6 +498,43 @@ int DetectTrend(const double &shPx[], const double &slPx[], const double &closes
     if(recentDown && belowResist) return -1;
     if(recentUp   && aboveSupport) return  1;
     return 0;
+}
+
+//+------------------------------------------------------------------+
+//| Big Move Cooldown — blocks trades after a sharp single-bar move |
+//|                                                                  |
+//| Logic:                                                           |
+//|   Scan the most recent InpBigMoveCooldownBars completed bars.   |
+//|   If any bar moved >= InpBigMovePct % on a close-to-open basis: |
+//|     · Bearish bar (drop)  → block SHORT for the cooldown window  |
+//|     · Bullish bar (rise)  → block LONG  for the cooldown window  |
+//|                                                                  |
+//| Rationale: a big move in the trade direction means the measured  |
+//| move has likely already triggered or the market is over-extended |
+//| — entering into that momentum invites a whipsaw.                 |
+//| Waiting for the market to settle avoids chasing exhausted legs.  |
+//+------------------------------------------------------------------+
+bool IsBigMoveCooldown(const string dir,
+                       const double &opens[], const double &closes[],
+                       const int bars)
+{
+    if(!InpUseBigMoveCooldown) return false;
+
+    double threshold = InpBigMovePct / 100.0;
+    int    lookback  = MathMin(InpBigMoveCooldownBars, bars - 1);
+
+    for(int i = 0; i < lookback; i++)
+    {
+        if(opens[i] == 0.0) continue;
+        double barMove = (closes[i] - opens[i]) / opens[i];
+
+        // A big bearish bar already delivered the downside — block SHORT
+        if(dir == "SHORT" && barMove <= -threshold) return true;
+
+        // A big bullish bar already delivered the upside — block LONG
+        if(dir == "LONG"  && barMove >=  threshold) return true;
+    }
+    return false;
 }
 
 //+------------------------------------------------------------------+
