@@ -61,6 +61,7 @@ input bool   InpManualConfirm     = true;   // true = Alert only | false = Auto-
 input group "=== Risk Management ==="
 input double InpRiskPercent       = 1.0;    // Risk per trade (% of account balance)
 input double InpMinRR             = 1.5;    // Minimum acceptable risk:reward ratio
+input double InpMaxLots           = 10.0;   // Hard cap on position size — never exceeded regardless of risk calc
 
 input group "=== Strategy Parameters ==="
 input int    InpCandleCount       = 150;    // Historical bars to analyse
@@ -155,8 +156,8 @@ void OnTick()
 //| Rule 9 — detect TP exits via trade transaction stream           |
 //+------------------------------------------------------------------+
 void OnTradeTransaction(const MqlTradeTransaction &trans,
-                        const MqlTradeResult      &result,
-                        const MqlTradeRequest     &request)
+                        const MqlTradeRequest     &request,
+                        const MqlTradeResult      &result)
 {
     if(!InpUsePostTPCooldown)           return;
     if(trans.type != TRADE_TRANSACTION_DEAL_ADD) return;
@@ -213,6 +214,8 @@ void RunStrategy()
     double pipVal = ((_Digits == 5 || _Digits == 3) ? _Point * 10.0 : _Point);
     double yMaxPct = MathMin(InpYMaxPct, 90.0);  // hard cap Rule 2
 
+    bool shortFired = false;
+
     //══════════════════════════════════════════════════════════════
     // SHORT SETUP
     // Sequence: X% UP → HIGH peak → minor LOW (exhaustion)
@@ -220,65 +223,58 @@ void RunStrategy()
     //           → price declining toward minor low → ENTRY
     //══════════════════════════════════════════════════════════════
     {
-        int    peakBar = -1;   double peakPx  = 0;
-        int    minorBar = -1;  double minorPx = 0;
-        int    pbBar   = -1;   double pbPx    = 0;
+        int    peakBar  = -1; double peakPx  = 0;
+        int    minorBar = -1; double minorPx = 0;
+        int    pbBar    = -1; double pbPx    = 0;
 
         if(FindShortSetup(highs, lows, InpCandleCount, InpBigXMovePct,
                           yMaxPct, InpMinPullbackPct, InpMaxPullbackPct,
                           pipVal, InpMinImpulsePips,
-                          peakBar, peakPx, minorBar, minorPx, pbBar, pbPx))
+                          peakBar, peakPx, minorBar, minorPx, pbBar, pbPx)
+           && ConfirmShortMomentum(closes, pbBar))
         {
-            // Rule 5: confirm price moving from pullback peak toward minor low
-            if(ConfirmShortMomentum(closes, pbBar))
+            double curPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+
+            // Rule 6: price must be inside the entry zone
+            bool inZone   = (curPrice > minorPx && curPrice < pbPx);
+            bool filtered = (InpUseBigMoveCooldown && IsBigMoveCooldown("SHORT", opens, closes, InpCandleCount))
+                         || (InpUseKeyLevelFilter  && IsNearKeyLevel(curPrice, "SHORT"));
+
+            if(inZone && !filtered)
             {
-                double curPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+                // Rule 3: calculate TP and SL
+                double midpoint     = (peakPx + minorPx) / 2.0;
+                double distMidMinor = midpoint - minorPx;
+                double tpPx         = minorPx - distMidMinor * (InpTPMultiplier / 100.0);
+                double slOpt1       = midpoint + pipVal * 2.0;
+                double slOpt2       = pbPx     + pipVal * 2.0;
+                double slPx         = MathMin(slOpt1, slOpt2);
 
-                // Rule 6: price must be inside the entry zone
-                if(curPrice > minorPx && curPrice < pbPx)
+                double risk   = slPx    - curPrice;
+                double reward = curPrice - tpPx;
+                double rr     = (risk > 0 && reward > 0) ? reward / risk : 0;
+
+                if(rr >= InpMinRR)
                 {
-                    // Rule 7 optional filters
-                    if(InpUseBigMoveCooldown && IsBigMoveCooldown("SHORT", opens, closes, InpCandleCount))
-                        goto TryLong;
-                    if(InpUseKeyLevelFilter  && IsNearKeyLevel(curPrice, "SHORT"))
-                        goto TryLong;
-
-                    // Rule 3: calculate TP and SL
-                    double midpoint       = (peakPx + minorPx) / 2.0;
-                    double distMidMinor   = midpoint - minorPx;           // > 0 for SHORT
-                    double tpPx           = minorPx - distMidMinor * (InpTPMultiplier / 100.0);
-                    double slOpt1         = midpoint + pipVal * 2.0;
-                    double slOpt2         = pbPx     + pipVal * 2.0;
-                    double slPx           = MathMin(slOpt1, slOpt2);       // tighter stop
-
-                    double risk   = slPx    - curPrice;
-                    double reward = curPrice - tpPx;
-                    if(risk <= 0 || reward <= 0) goto TryLong;
-                    double rr = reward / risk;
-                    if(rr < InpMinRR)  goto TryLong;
-
-                    double lots   = CalcLots(curPrice, slPx);
+                    double lots    = CalcLots(curPrice, slPx);
                     string summary = BuildSummary("SHORT", curPrice, slPx, tpPx, rr,
                                                   peakPx, minorPx, pbPx, midpoint, lots);
-
                     DrawLevels(curPrice, slPx, tpPx, "SHORT");
                     Comment(summary);
 
                     if(InpManualConfirm)
                         Alert("MARCI EA  >>>  SHORT SETUP on ", _Symbol, "\n\n", summary);
-                    else
-                    {
-                        if(lots > 0)
-                            if(!Trade.Sell(lots, _Symbol, curPrice, slPx, tpPx, "Marci_MM_SHORT"))
-                                Print("Order failed: ", Trade.ResultRetcodeDescription());
-                    }
-                    return; // setup fired — done for this bar
+                    else if(lots > 0)
+                        if(!Trade.Sell(lots, _Symbol, curPrice, slPx, tpPx, "Marci_MM_SHORT"))
+                            Print("Order failed: ", Trade.ResultRetcodeDescription());
+
+                    shortFired = true;
                 }
             }
         }
     }
 
-    TryLong:
+    if(shortFired) return;
     //══════════════════════════════════════════════════════════════
     // LONG SETUP
     // Sequence: X% DOWN → LOW trough → minor HIGH (expansion)
@@ -705,7 +701,7 @@ double CalcLots(double entry, double stopLoss)
     if(tickSize == 0 || tickVal == 0) return minLot;
 
     double lot     = riskAmt / (slDist * (tickVal / tickSize));
-    double maxLot  = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+    double maxLot  = MathMin(SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX), InpMaxLots);
     double lotStep = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
 
     lot = MathMax(minLot, MathMin(maxLot, lot));
