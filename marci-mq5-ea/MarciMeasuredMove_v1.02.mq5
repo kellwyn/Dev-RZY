@@ -55,29 +55,30 @@
 
 //── Inputs ────────────────────────────────────────────────────────
 
+// Default settings profile: v102_settings_xauone (XAUUSD)
 input group "=== Execution Mode ==="
-input bool   InpManualConfirm     = true;   // true = Alert only | false = Auto-execute (backtest)
+input bool   InpManualConfirm     = false;  // true = Alert only | false = Auto-execute (backtest)
 
 input group "=== Risk Management ==="
-input double InpRiskPercent       = 1.0;    // Risk per trade (% of account balance)
-input double InpMinRR             = 1.5;    // Minimum acceptable risk:reward ratio
-input double InpMaxLots           = 10.0;   // Hard cap on position size — never exceeded regardless of risk calc
+input double InpRiskPercent       = 0.15;   // Risk per trade (% of account balance)
+input double InpMinRR             = 0;      // Minimum acceptable risk:reward (0 = disabled)
+input double InpMaxLots           = 7.0;    // Hard cap on position size — never exceeded regardless of risk calc
 
 input group "=== Strategy Parameters ==="
-input int    InpCandleCount       = 150;    // Historical bars to analyse
-input double InpBigXMovePct       = 1.5;    // X% — impulse move size that defines the peak
+input int    InpCandleCount       = 20;     // Historical bars to analyse
+input double InpBigXMovePct       = 0.5;    // X% — impulse move size that defines the peak
                                             //   Forex: 1-2%  |  Indices: 2-4%  |  Crypto: 5%+
-input double InpYMaxPct           = 70.0;   // Y% — max distance (minor pt → peak) as % of X move
-                                            //   Hard cap: 90%. Smaller = tighter structure required
-input double InpTPMultiplier      = 70.0;   // TP = this% × (midpoint → minor point distance)
+input double InpYMaxPct           = 600.0;  // Y% — max distance (minor pt → peak) as % of X move
+                                            //   Hard cap at runtime: 90%. Set high to effectively disable.
+input double InpTPMultiplier      = 0.5;    // TP = this% × (midpoint → minor point distance)
 
 input group "=== Pullback Strength Gates ==="
-input double InpMinImpulsePips    = 15.0;   // Minimum impulse size (pips) — filters noise
-input double InpMinPullbackPct    = 25.0;   // Min pullback retracement % of peak→minor distance
+input double InpMinImpulsePips    = 5.0;    // Minimum impulse size (pips) — filters noise
+input double InpMinPullbackPct    = 2.0;    // Min pullback retracement % of peak→minor distance
 input double InpMaxPullbackPct    = 70.0;   // Max pullback retracement % (deeper = weakening)
 
 input group "=== ICT Session Filter (Rule 8) ==="
-input bool   InpUseSessionFilter  = true;   // Only trade during active ICT sessions
+input bool   InpUseSessionFilter  = false;  // Only trade during active ICT sessions
 input int    InpGMTOffset         = 0;      // Broker server offset from GMT (e.g. +2 = EET)
 // Asian session — includes 1 hr pre-market
 input int    InpAsianStartH       = 23;     // 23:00 GMT = 1hr before Tokyo open
@@ -100,8 +101,8 @@ input double InpBigMovePct          = 1.0;  // Single-bar move >= this % trigger
 input int    InpBigMoveCooldownBars = 20;   // Bars to stay blocked after trigger
 
 input group "=== Key Level Filter (Rule 7) ==="
-input bool   InpUseKeyLevelFilter   = false;// Block trades within X pips of ATH/ATL, W1/MN1 pivots
-input double InpKeyLevelPips        = 50.0; // Key level proximity buffer (pips)
+input bool   InpUseKeyLevelFilter   = true; // Block trades within X pips of ATH/ATL, W1/MN1 pivots
+input double InpKeyLevelPips        = 10.0; // Key level proximity buffer (pips)
 
 input group "=== Trade Settings ==="
 input int    InpMagicNumber       = 20260412;
