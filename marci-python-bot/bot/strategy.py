@@ -1,485 +1,629 @@
 """
-Marci Silfrain — Measured Move Trend Strategy
-Detects "Little RZY" structures and generates TradeSetup signals.
+Marci Silfrain — Measured Move Trend Strategy  v1.02
+Python implementation mirroring MarciMeasuredMove_v1.02.mq5
 
-Strategy rules (from playbook):
-  1.  Identify the trend first (LH+LL = downtrend, HH+HL = uptrend)
-  2.  Wait for the initial impulse move + pullback — never enter the impulse
-  3.  Draw trendline across pullback highs (downtrend) / lows (uptrend)
-  4.  Find the lowest low (short) or highest high (long) in the pullback structure
-  5.  Measure vertical distance from that point to the trendline
-  6.  Project that distance in the trend direction = target
-  7.  Enter when price rejects the trendline and resumes the trend
-  8.  Stop above pullback high (short) / below pullback low (long)
-  9.  Use Bollinger Bands as a context filter (near upper BB = better shorts)
-  10. First/second structures are strongest; 4th+ shows exhaustion
+Setup sequence (both directions):
+  Rule 1  — X% impulse move identifies the peak (HIGH or LOW trough)
+  Rule 2  — Minor LOW/HIGH found strictly between peak and pullback peak
+             Y% gate ensures it stays minor vs the X move
+  Rule 3  — Midpoint TP: 70%*(mid→minor dist) beyond minor point
+             SL: tighter of midpoint±2pip or pullbackPeak±2pip
+  Rule 4  — Pullback depth + minimum impulse size gates
+  Rule 5  — 2-bar momentum confirmation from pullback peak
+  Rule 6  — Entry in zone between minor point and pullback peak
+  Rule 7  — Big Move Cooldown + Key Level filters (optional)
+  Rule 8  — ICT session gate: Asian / London / NY AM + 1hr pre-mkt
+  Rule 9  — Post-TP cooldown: 20-min block after TP + big follow-through
+
+NOTE on array direction:
+  Python/MT5 arrays are chronological: index 0 = oldest, -1 = most recent.
+  This is the OPPOSITE of MQL5 AsSeries. All index comparisons below are
+  written in chronological (left=old, right=new) terms.
 """
+
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass
+from datetime import datetime, timezone, timedelta
+from typing import Optional, Tuple
 
 import numpy as np
 import pandas as pd
 import MetaTrader5 as mt5
-from datetime import datetime
-from typing import List, Optional, Tuple
 
 from .signals import TradeSetup
 
-# ── Timeframe map ─────────────────────────────────────────────────────────────
 
-TF_MAP = {
-    "M1":  mt5.TIMEFRAME_M1,
-    "M5":  mt5.TIMEFRAME_M5,
-    "M15": mt5.TIMEFRAME_M15,
-    "M30": mt5.TIMEFRAME_M30,
-    "H1":  mt5.TIMEFRAME_H1,
-    "H4":  mt5.TIMEFRAME_H4,
-    "D1":  mt5.TIMEFRAME_D1,
-    "W1":  mt5.TIMEFRAME_W1,
-    "MN1": mt5.TIMEFRAME_MN1,
-}
+# ── Strategy configuration ────────────────────────────────────────────────────
+
+@dataclass
+class StrategyConfig:
+    # Execution
+    symbol:          str   = "XAUUSD"
+    timeframe:       str   = "H1"
+    manual_confirm:  bool  = False          # False = auto-execute
+
+    # Risk
+    risk_pct:        float = 0.15
+    min_rr:          float = 0.0            # 0 = disabled
+    max_lots:        float = 7.0
+
+    # Strategy
+    candle_count:    int   = 20
+    big_x_move_pct:  float = 0.5           # X% impulse
+    y_max_pct:       float = 600.0         # capped to 90 at runtime
+    tp_multiplier:   float = 0.5           # % of mid→minor distance
+
+    # Pullback gates
+    min_impulse_pips: float = 5.0
+    min_pullback_pct: float = 2.0
+    max_pullback_pct: float = 70.0
+
+    # ICT session filter (Rule 8)
+    use_session:      bool  = False
+    gmt_offset:       int   = 0
+    asian_start_h:    int   = 23
+    asian_end_h:      int   = 9
+    london_start_h:   int   = 7
+    london_end_h:     int   = 16
+    ny_start_h:       int   = 12
+    ny_end_h:         int   = 17
+
+    # Post-TP cooldown (Rule 9)
+    use_post_tp_cooldown:   bool  = True
+    post_tp_cooldown_mins:  int   = 20
+
+    # Big Move Cooldown (Rule 7)
+    use_big_move_cooldown:  bool  = True
+    big_move_pct:           float = 1.0
+    big_move_cooldown_bars: int   = 20
+
+    # Key Level filter (Rule 7)
+    use_key_level:    bool  = True
+    key_level_pips:   float = 10.0
+
+    # Trade settings
+    magic:    int = 20260412
+    slippage: int = 20
+
+
+# ── Module-level cooldown state ───────────────────────────────────────────────
+# Mirrors the MQL5 globals g_lastTPExitTime / g_lastTPExitPrice.
+
+_last_tp_exit_time:  Optional[datetime] = None
+_last_tp_exit_price: float              = 0.0
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _pip_size(symbol: str) -> float:
+    """Return the pip size for a symbol (handles 3/5-digit and 2/4-digit)."""
+    info = mt5.symbol_info(symbol)
+    if info is None:
+        return 0.0001
+    return info.point * 10 if info.digits in (3, 5) else info.point
+
+
+def _in_session_window(h: int, start: int, end: int) -> bool:
+    """True if hour h is inside [start, end), handling midnight spans."""
+    if start > end:
+        return h >= start or h < end
+    return start <= h < end
+
+
+def get_current_session(cfg: StrategyConfig) -> str:
+    """Return the name of the active ICT session(s), or 'ALL' if filter off."""
+    if not cfg.use_session:
+        return "ALL"
+
+    h = (datetime.now(timezone.utc).hour + cfg.gmt_offset) % 24
+
+    parts = []
+    if _in_session_window(h, cfg.asian_start_h, cfg.asian_end_h):
+        parts.append("PRE-ASIAN" if h == cfg.asian_start_h else "ASIAN")
+    if _in_session_window(h, cfg.london_start_h, cfg.london_end_h):
+        parts.append("PRE-LONDON" if h == cfg.london_start_h else "LONDON")
+    if _in_session_window(h, cfg.ny_start_h, cfg.ny_end_h):
+        parts.append("PRE-NY" if h == cfg.ny_start_h else "NY AM")
+
+    return " / ".join(parts) if parts else ""
+
+
+def is_in_trading_session(cfg: StrategyConfig) -> bool:
+    """Rule 8: True if the current time falls in an active ICT session."""
+    if not cfg.use_session:
+        return True
+    return bool(get_current_session(cfg))
+
+
+# ── Rule 9: Post-TP cooldown ──────────────────────────────────────────────────
+
+def check_and_update_tp_state(cfg: StrategyConfig):
+    """
+    Scan recent deal history for TP exits belonging to this EA.
+    Updates module-level _last_tp_exit_time / _last_tp_exit_price.
+    """
+    global _last_tp_exit_time, _last_tp_exit_price
+
+    if not cfg.use_post_tp_cooldown:
+        return
+
+    now = datetime.now(timezone.utc)
+    from_dt = now - timedelta(minutes=cfg.post_tp_cooldown_mins + 5)
+
+    deals = mt5.history_deals_get(from_dt, now)
+    if deals is None:
+        return
+
+    for d in reversed(deals):               # newest first
+        if (d.magic == cfg.magic and
+                d.reason == mt5.DEAL_REASON_TP and
+                d.entry  == mt5.DEAL_ENTRY_OUT):
+            exit_time = datetime.fromtimestamp(d.time, tz=timezone.utc)
+            if _last_tp_exit_time is None or exit_time > _last_tp_exit_time:
+                _last_tp_exit_time  = exit_time
+                _last_tp_exit_price = d.price
+            break
+
+
+def is_post_tp_cooldown(last_close: float, cfg: StrategyConfig) -> bool:
+    """
+    Rule 9: block a new entry if a TP exit occurred within the cooldown window
+    AND price has moved >= big_move_pct% since that exit.
+    """
+    if not cfg.use_post_tp_cooldown:
+        return False
+    if _last_tp_exit_time is None or _last_tp_exit_price == 0.0:
+        return False
+
+    elapsed = (datetime.now(timezone.utc) - _last_tp_exit_time).total_seconds()
+    if elapsed > cfg.post_tp_cooldown_mins * 60:
+        return False
+
+    move = abs(last_close - _last_tp_exit_price) / _last_tp_exit_price * 100.0
+    return move >= cfg.big_move_pct
+
+
+# ── Rule 7: Big Move Cooldown ─────────────────────────────────────────────────
+
+def is_big_move_cooldown(direction: str, opens: np.ndarray,
+                          closes: np.ndarray, cfg: StrategyConfig) -> bool:
+    """
+    Block entries if any bar in the last N bars moved >= big_move_pct% on a
+    close-vs-open basis in the trade direction (move already exhausted).
+    """
+    if not cfg.use_big_move_cooldown:
+        return False
+
+    threshold = cfg.big_move_pct / 100.0
+    lookback  = min(cfg.big_move_cooldown_bars, len(opens))
+
+    for i in range(1, lookback + 1):        # scan from most recent bar back
+        o, c = opens[-i], closes[-i]
+        if o == 0:
+            continue
+        move = (c - o) / o
+        if direction == "SHORT" and move <= -threshold:
+            return True
+        if direction == "LONG"  and move >=  threshold:
+            return True
+    return False
+
+
+# ── Rule 7: Key Level filter ──────────────────────────────────────────────────
+
+def is_near_key_level(symbol: str, price: float,
+                       direction: str, cfg: StrategyConfig) -> bool:
+    """Check ATH/ATL (520 W1), Monthly H/L (12), Weekly H/L (52)."""
+    if not cfg.use_key_level:
+        return False
+
+    pip  = _pip_size(symbol)
+    buf  = cfg.key_level_pips * pip
+
+    checks = [
+        (mt5.TIMEFRAME_W1,  52),
+        (mt5.TIMEFRAME_MN1, 12),
+        (mt5.TIMEFRAME_W1,  520),
+    ]
+
+    for tf, count in checks:
+        rates = mt5.copy_rates_from_pos(symbol, tf, 0, count)
+        if rates is None or len(rates) == 0:
+            continue
+        highs_ = np.array([r["high"] for r in rates])
+        lows_  = np.array([r["low"]  for r in rates])
+        lvl_h  = float(highs_.max())
+        lvl_l  = float(lows_.min())
+        if direction == "SHORT" and abs(price - lvl_l) <= buf:
+            return True
+        if direction == "LONG"  and abs(price - lvl_h) <= buf:
+            return True
+
+    return False
+
+
+# ── Rule 1-4: Setup detection ─────────────────────────────────────────────────
+# Python arrays are chronological (index 0 = oldest, -1 = most recent),
+# the OPPOSITE of MQL5 AsSeries.  The temporal sequence for SHORT is:
+#
+#  older ──────────────────────────────────── newer
+#  [..] → PEAK (peak_idx) → MINOR LOW (minor_idx) → PB PEAK (pb_idx) → current
+#
+# So: peak_idx < minor_idx < pb_idx  (unlike MQL5 where peakBar > minorBar > pbBar)
+
+
+def _find_short_setup(
+    highs: np.ndarray, lows: np.ndarray,
+    cfg: StrategyConfig, pip: float,
+) -> Optional[dict]:
+    """
+    Locate a SHORT setup structure.
+    Returns a dict of key indices/prices or None if not found.
+    """
+    n = len(highs)
+    if n < 6:
+        return None
+
+    y_max = min(cfg.y_max_pct, 90.0)
+
+    # Step 1 — PEAK: absolute highest high in lookback
+    peak_idx = int(np.argmax(highs))
+    peak_px  = float(highs[peak_idx])
+
+    # Need enough bars after peak
+    bars_after = n - peak_idx - 1
+    if bars_after < 4:
+        return None
+
+    # Step 2 — Validate X% UP move (prior low is in bars UP TO and including peak)
+    prior_low   = float(np.min(lows[:peak_idx + 1]))
+    x_move_px   = peak_px - prior_low
+    if x_move_px <= 0 or prior_low == 0:
+        return None
+    x_move_pct  = x_move_px / prior_low * 100.0
+    if x_move_pct < cfg.big_x_move_pct:
+        return None
+
+    # Step 3 — PULLBACK PEAK: highest high in bars AFTER peak
+    seg = highs[peak_idx + 1:]
+    pb_local = int(np.argmax(seg))
+    pb_idx   = peak_idx + 1 + pb_local
+    pb_px    = float(highs[pb_idx])
+
+    if pb_px >= peak_px:        # must be a lower high
+        return None
+    if n - pb_idx - 1 < 2:     # need 2 confirmed bars after pb peak
+        return None
+
+    # Step 4 — MINOR LOW: lowest low strictly BETWEEN peak and pb peak
+    window = lows[peak_idx + 1 : pb_idx]
+    if len(window) < 1:
+        return None
+    minor_local = int(np.argmin(window))
+    minor_idx   = peak_idx + 1 + minor_local
+    minor_px    = float(lows[minor_idx])
+
+    if minor_px >= pb_px:       # minor must be below pullback peak
+        return None
+
+    # Step 5 — Y% gate
+    minor_dist = peak_px - minor_px
+    if minor_dist <= 0:
+        return None
+    if minor_dist > (y_max / 100.0) * x_move_px:
+        return None
+
+    # Step 6 — Pullback depth
+    pb_depth = (pb_px - minor_px) / (peak_px - minor_px) * 100.0
+    if not (cfg.min_pullback_pct <= pb_depth <= cfg.max_pullback_pct):
+        return None
+
+    # Step 7 — Min impulse size
+    if pip > 0 and (minor_dist / pip) < cfg.min_impulse_pips:
+        return None
+
+    return dict(peak_idx=peak_idx, peak_px=peak_px,
+                minor_idx=minor_idx, minor_px=minor_px,
+                pb_idx=pb_idx, pb_px=pb_px,
+                x_move_pct=x_move_pct)
+
+
+def _find_long_setup(
+    highs: np.ndarray, lows: np.ndarray,
+    cfg: StrategyConfig, pip: float,
+) -> Optional[dict]:
+    """
+    Locate a LONG setup structure (mirror of SHORT).
+    Temporal sequence: TROUGH → MINOR HIGH → PB TROUGH → current
+    """
+    n = len(highs)
+    if n < 6:
+        return None
+
+    y_max = min(cfg.y_max_pct, 90.0)
+
+    # Step 1 — TROUGH: absolute lowest low
+    trough_idx = int(np.argmin(lows))
+    trough_px  = float(lows[trough_idx])
+
+    bars_after = n - trough_idx - 1
+    if bars_after < 4:
+        return None
+
+    # Step 2 — Validate X% DOWN move
+    prior_high  = float(np.max(highs[:trough_idx + 1]))
+    x_move_px   = prior_high - trough_px
+    if x_move_px <= 0 or prior_high == 0:
+        return None
+    x_move_pct  = x_move_px / prior_high * 100.0
+    if x_move_pct < cfg.big_x_move_pct:
+        return None
+
+    # Step 3 — PULLBACK TROUGH: lowest low in bars AFTER trough
+    seg      = lows[trough_idx + 1:]
+    pb_local = int(np.argmin(seg))
+    pb_idx   = trough_idx + 1 + pb_local
+    pb_px    = float(lows[pb_idx])
+
+    if pb_px <= trough_px:      # must be a higher low
+        return None
+    if n - pb_idx - 1 < 2:
+        return None
+
+    # Step 4 — MINOR HIGH: highest high strictly BETWEEN trough and pb trough
+    window = highs[trough_idx + 1 : pb_idx]
+    if len(window) < 1:
+        return None
+    minor_local = int(np.argmax(window))
+    minor_idx   = trough_idx + 1 + minor_local
+    minor_px    = float(highs[minor_idx])
+
+    if minor_px <= pb_px:       # minor must be above pullback trough
+        return None
+
+    # Step 5 — Y% gate
+    minor_dist = minor_px - trough_px
+    if minor_dist <= 0:
+        return None
+    if minor_dist > (y_max / 100.0) * x_move_px:
+        return None
+
+    # Step 6 — Pullback depth
+    pb_depth = (minor_px - pb_px) / (minor_px - trough_px) * 100.0
+    if not (cfg.min_pullback_pct <= pb_depth <= cfg.max_pullback_pct):
+        return None
+
+    # Step 7 — Min impulse size
+    if pip > 0 and (minor_dist / pip) < cfg.min_impulse_pips:
+        return None
+
+    return dict(trough_idx=trough_idx, trough_px=trough_px,
+                minor_idx=minor_idx, minor_px=minor_px,
+                pb_idx=pb_idx, pb_px=pb_px,
+                x_move_pct=x_move_pct)
+
+
+# ── Rule 5: Momentum confirmation ─────────────────────────────────────────────
+
+def _confirm_short_momentum(closes: np.ndarray, pb_idx: int) -> bool:
+    """Two declining closes after the pullback peak."""
+    if len(closes) - pb_idx - 1 < 2:
+        return False
+    return closes[-1] < closes[-2] and closes[-2] <= closes[pb_idx]
+
+
+def _confirm_long_momentum(closes: np.ndarray, pb_idx: int) -> bool:
+    """Two rising closes after the pullback trough."""
+    if len(closes) - pb_idx - 1 < 2:
+        return False
+    return closes[-1] > closes[-2] and closes[-2] >= closes[pb_idx]
+
 
 # ── Data fetching ─────────────────────────────────────────────────────────────
 
-def fetch_candles(symbol: str, tf_str: str, count: int = 200) -> Optional[pd.DataFrame]:
-    """
-    Fetch completed OHLC candles from MT5.
-    Starts at position 1 to skip the currently forming bar.
-    """
-    tf = TF_MAP.get(tf_str.upper())
-    if tf is None:
-        print(f"  Unknown timeframe: {tf_str}")
-        return None
+_TF_MAP = {
+    "M1": mt5.TIMEFRAME_M1, "M5":  mt5.TIMEFRAME_M5,
+    "M15": mt5.TIMEFRAME_M15, "M30": mt5.TIMEFRAME_M30,
+    "H1": mt5.TIMEFRAME_H1, "H4":  mt5.TIMEFRAME_H4,
+    "D1": mt5.TIMEFRAME_D1, "W1":  mt5.TIMEFRAME_W1,
+    "MN1": mt5.TIMEFRAME_MN1,
+}
 
+
+def _fetch(symbol: str, tf_str: str, count: int) -> Optional[pd.DataFrame]:
+    """Fetch completed OHLC bars (skips forming bar via pos=1)."""
+    tf = _TF_MAP.get(tf_str.upper())
+    if tf is None:
+        return None
     rates = mt5.copy_rates_from_pos(symbol, tf, 1, count)
     if rates is None or len(rates) == 0:
         return None
-
     df = pd.DataFrame(rates)
     df["time"] = pd.to_datetime(df["time"], unit="s")
-    df.rename(columns={"open": "o", "high": "h", "low": "l", "close": "c"}, inplace=True)
+    df.rename(columns={"open": "o", "high": "h",
+                        "low": "l", "close": "c"}, inplace=True)
     return df
 
-# ── Bollinger Bands ───────────────────────────────────────────────────────────
 
-def calc_bollinger(
-    closes: np.ndarray, period: int = 20, std_dev: float = 2.0
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Returns (upper, middle, lower) Bollinger Band arrays."""
-    s   = pd.Series(closes)
-    mid = s.rolling(period).mean().values
-    std = s.rolling(period).std().values
-    return mid + std_dev * std, mid, mid - std_dev * std
+# ── Gap guard ─────────────────────────────────────────────────────────────────
+
+def _gap_guard(df: pd.DataFrame) -> bool:
+    """Return True (pass) if the most recent bar opened inside the prior bar's range."""
+    if len(df) < 2:
+        return False
+    o0 = df["o"].iloc[-1]
+    h1 = df["h"].iloc[-2]
+    l1 = df["l"].iloc[-2]
+    return l1 <= o0 <= h1
 
 
-def bb_position_label(price: float, upper: float, middle: float, lower: float) -> str:
-    """Classify price position relative to Bollinger Bands."""
-    band_width = upper - lower
-    if band_width == 0:
-        return "MIDDLE"
-    pos = (price - lower) / band_width   # 0 = at lower, 1 = at upper
-    if price >= upper:
-        return "BEYOND_UPPER"
-    elif price <= lower:
-        return "BEYOND_LOWER"
-    elif pos >= 0.75:
-        return "NEAR_UPPER"
-    elif pos <= 0.25:
-        return "NEAR_LOWER"
-    else:
-        return "MIDDLE"
+# ── Core: detect one setup ────────────────────────────────────────────────────
 
-# ── Swing point detection ─────────────────────────────────────────────────────
-
-def find_swing_highs(highs: np.ndarray, n: int = 3) -> List[Tuple[int, float]]:
+def find_setup(cfg: StrategyConfig) -> Optional[TradeSetup]:
     """
-    Returns (index, price) for confirmed swing highs.
-    A swing high requires n bars of lower highs on both sides.
+    Fetch bars, run all pre-checks, attempt SHORT then LONG.
+    Returns a TradeSetup if found, otherwise None.
     """
-    result = []
-    for i in range(n, len(highs) - n):
-        if (all(highs[i] >= highs[i - j] for j in range(1, n + 1)) and
-                all(highs[i] >= highs[i + j] for j in range(1, n + 1))):
-            result.append((i, float(highs[i])))
-    return result
-
-
-def find_swing_lows(lows: np.ndarray, n: int = 3) -> List[Tuple[int, float]]:
-    """
-    Returns (index, price) for confirmed swing lows.
-    A swing low requires n bars of higher lows on both sides.
-    """
-    result = []
-    for i in range(n, len(lows) - n):
-        if (all(lows[i] <= lows[i - j] for j in range(1, n + 1)) and
-                all(lows[i] <= lows[i + j] for j in range(1, n + 1))):
-            result.append((i, float(lows[i])))
-    return result
-
-# ── Trend detection ───────────────────────────────────────────────────────────
-
-def detect_trend(
-    swing_highs: List[Tuple[int, float]],
-    swing_lows: List[Tuple[int, float]],
-    min_pts: int = 3,
-) -> str:
-    """
-    Rule 1 from playbook: confirm the trend using swing structure.
-    Returns 'DOWN', 'UP', or 'SIDEWAYS'.
-    Requires min_pts consecutive swing points all moving the same direction.
-    """
-    if len(swing_highs) < min_pts or len(swing_lows) < min_pts:
-        return "SIDEWAYS"
-
-    sh = [p for _, p in swing_highs[-min_pts:]]
-    sl = [p for _, p in swing_lows[-min_pts:]]
-
-    sh_down = all(sh[i] > sh[i + 1] for i in range(len(sh) - 1))
-    sl_down = all(sl[i] > sl[i + 1] for i in range(len(sl) - 1))
-    sh_up   = all(sh[i] < sh[i + 1] for i in range(len(sh) - 1))
-    sl_up   = all(sl[i] < sl[i + 1] for i in range(len(sl) - 1))
-
-    if sh_down and sl_down:
-        return "DOWN"
-    elif sh_up and sl_up:
-        return "UP"
-    return "SIDEWAYS"
-
-# ── Structure count ───────────────────────────────────────────────────────────
-
-def count_structures(
-    swing_highs: List[Tuple[int, float]],
-    swing_lows: List[Tuple[int, float]],
-    direction: str,
-) -> int:
-    """
-    Rule 9 from playbook: count how many Little RZY structures have already
-    formed in this trend.  1 = first (strongest), 4+ = exhaustion zone.
-    """
-    if direction == "DOWN":
-        return max(1, len(swing_lows) - 1)
-    elif direction == "UP":
-        return max(1, len(swing_highs) - 1)
-    return 1
-
-# ── Signal strength ───────────────────────────────────────────────────────────
-
-def assess_signal_strength(direction: str, bb_pos: str, struct_count: int) -> str:
-    """
-    Rule 8 + 9 combined:
-      HIGH   = early structure (1-2) + BB in favorable zone
-      MEDIUM = early structure OR favorable BB, but not both
-      LOW    = late structure (4+) OR price at exhausted BB extreme
-    """
-    early = struct_count <= 2
-
-    if direction == "SHORT":
-        good_bb      = bb_pos in ("NEAR_UPPER", "BEYOND_UPPER")
-        exhausted_bb = bb_pos in ("NEAR_LOWER", "BEYOND_LOWER")
-    else:
-        good_bb      = bb_pos in ("NEAR_LOWER", "BEYOND_LOWER")
-        exhausted_bb = bb_pos in ("NEAR_UPPER", "BEYOND_UPPER")
-
-    if exhausted_bb or struct_count >= 4:
-        return "LOW"
-    elif early and good_bb:
-        return "HIGH"
-    else:
-        return "MEDIUM"
-
-# ── Little RZY setup detection ────────────────────────────────────────────────
-
-def find_rzy_setup(
-    df: pd.DataFrame,
-    symbol: str,
-    tf_str: str,
-    swing_n: int = 3,
-    min_rr: float = 1.5,
-) -> Optional[TradeSetup]:
-    """
-    Core detector.  Implements all 10 rules from the Marci Silfrain playbook.
-
-    For a SHORT in a downtrend:
-      • anchor_price     = most recent swing low (SL)   — impulse endpoint
-      • pullback_extreme = highest high after SL (PH)   — trendline reference
-      • measured_distance = PH - SL
-      • target           = SL - measured_distance
-      • stop             = PH + small buffer
-
-    For a LONG in an uptrend: mirror image.
-    """
-    if len(df) < 50:
+    df = _fetch(cfg.symbol, cfg.timeframe, cfg.candle_count)
+    if df is None or len(df) < 6:
         return None
 
-    highs  = df["h"].values
-    lows   = df["l"].values
-    closes = df["c"].values
+    highs  = df["h"].values.astype(float)
+    lows   = df["l"].values.astype(float)
+    closes = df["c"].values.astype(float)
+    opens  = df["o"].values.astype(float)
 
-    # ── Bollinger Bands ───────────────────────────────────────────────────────
-    bb_upper_arr, bb_mid_arr, bb_lower_arr = calc_bollinger(closes)
-    last_bb_upper  = bb_upper_arr[-1]
-    last_bb_mid    = bb_mid_arr[-1]
-    last_bb_lower  = bb_lower_arr[-1]
-
-    if np.isnan(last_bb_upper):
+    # Pre-check 1: gap guard
+    if not _gap_guard(df):
         return None
 
-    current_price = float(closes[-1])
-    bb_pos = bb_position_label(current_price, last_bb_upper, last_bb_mid, last_bb_lower)
-
-    # ── Swing points ──────────────────────────────────────────────────────────
-    sw_highs = find_swing_highs(highs, swing_n)
-    sw_lows  = find_swing_lows(lows, swing_n)
-
-    if not sw_highs or not sw_lows:
+    # Pre-check 2: ICT session filter (Rule 8)
+    if not is_in_trading_session(cfg):
         return None
 
-    # ── Trend (Rule 1) ────────────────────────────────────────────────────────
-    trend = detect_trend(sw_highs, sw_lows)
-    if trend == "SIDEWAYS":
+    # Pre-check 3: post-TP cooldown (Rule 9)
+    check_and_update_tp_state(cfg)
+    if is_post_tp_cooldown(float(closes[-1]), cfg):
         return None
 
-    struct_count = count_structures(sw_highs, sw_lows, trend)
+    pip     = _pip_size(cfg.symbol)
+    session = get_current_session(cfg)
 
-    # ── Tick data for live price ──────────────────────────────────────────────
-    tick     = mt5.symbol_info_tick(symbol)
-    sym_info = mt5.symbol_info(symbol)
-    if tick is None or sym_info is None:
+    tick = mt5.symbol_info_tick(cfg.symbol)
+    if tick is None:
         return None
 
-    # ════════════════════════════════════════════════════════════════════════
-    # SHORT SETUP  (downtrend "Little RZY")
-    # ════════════════════════════════════════════════════════════════════════
-    if trend == "DOWN":
-        # Rule 2: wait for impulse + pullback
-        # Anchor = most recent swing low (bottom of impulse)
-        sl_idx, sl_price = sw_lows[-1]
+    # ── Try SHORT ─────────────────────────────────────────────────────────────
+    s = _find_short_setup(highs, lows, cfg, pip)
+    if s and _confirm_short_momentum(closes, s["pb_idx"]):
+        cur = float(tick.bid)
 
-        # Find pullback high: highest high in candles after the swing low
-        seg_highs = highs[sl_idx:]
-        if len(seg_highs) < 2:
-            return None
+        # Rule 6: price in entry zone
+        if s["minor_px"] < cur < s["pb_px"]:
 
-        ph_local_idx = int(np.argmax(seg_highs))
-        ph_price     = float(seg_highs[ph_local_idx])
-        ph_idx       = sl_idx + ph_local_idx
+            # Rule 7 filters
+            if is_big_move_cooldown("SHORT", opens, closes, cfg):
+                s = None
+            elif is_near_key_level(cfg.symbol, cur, "SHORT", cfg):
+                s = None
 
-        # Sanity: pullback must not exceed the prior swing high (would break trend)
-        # Rule 10 invalidation check
-        if sw_highs and ph_price >= sw_highs[-1][1]:
-            return None
+            if s:
+                midpoint     = (s["peak_px"] + s["minor_px"]) / 2.0
+                dist         = midpoint - s["minor_px"]           # > 0
+                tp_px        = s["minor_px"] - dist * (cfg.tp_multiplier / 100.0)
+                sl_opt1      = midpoint      + pip * 2.0
+                sl_opt2      = s["pb_px"]    + pip * 2.0
+                sl_px        = min(sl_opt1, sl_opt2)
 
-        # Rule 3/4: entry conditions — price in pullback zone and rolling over
-        in_zone = sl_price < current_price < ph_price
+                risk   = sl_px - cur
+                reward = cur   - tp_px
+                rr     = round(reward / risk, 2) if (risk > 0 and reward > 0) else 0.0
 
-        # Has price recently visited the upper part of the pullback (near trendline)?
-        recent_closes = closes[max(0, len(closes) - 8):]
-        visited_peak  = any(c >= ph_price * 0.97 for c in recent_closes)
+                if rr >= cfg.min_rr:
+                    return TradeSetup(
+                        symbol=cfg.symbol, timeframe=cfg.timeframe,
+                        direction="SHORT",
+                        entry=cur, stop_loss=sl_px, target=tp_px,
+                        risk_reward=rr,
+                        peak_px=s["peak_px"], minor_px=s["minor_px"],
+                        pb_peak_px=s["pb_px"], midpoint=midpoint,
+                        x_move_pct=s["x_move_pct"],
+                        session=session,
+                        setup_notes=_build_notes(
+                            "SHORT", cur, sl_px, tp_px, rr,
+                            s["peak_px"], s["minor_px"],
+                            s["pb_px"], midpoint,
+                            s["x_move_pct"], session),
+                    )
 
-        # Bearish momentum: current price has pulled back from the recent high
-        recent_hi = float(np.max(highs[max(0, len(highs) - 5):]))
-        rolling_over = current_price < recent_hi * 0.999
+    # ── Try LONG ──────────────────────────────────────────────────────────────
+    lg = _find_long_setup(highs, lows, cfg, pip)
+    if lg and _confirm_long_momentum(closes, lg["pb_idx"]):
+        cur = float(tick.ask)
 
-        if not (in_zone and visited_peak and rolling_over):
-            return None
+        if lg["pb_px"] < cur < lg["minor_px"]:
 
-        # Rule 4/5: measured distance and target
-        measured_distance = ph_price - sl_price
-        if measured_distance <= 0:
-            return None
+            if is_big_move_cooldown("LONG", opens, closes, cfg):
+                lg = None
+            elif is_near_key_level(cfg.symbol, cur, "LONG", cfg):
+                lg = None
 
-        target = sl_price - measured_distance
+            if lg:
+                midpoint = (lg["trough_px"] + lg["minor_px"]) / 2.0
+                dist     = lg["minor_px"] - midpoint              # > 0
+                tp_px    = lg["minor_px"] + dist * (cfg.tp_multiplier / 100.0)
+                sl_opt1  = midpoint      - pip * 2.0
+                sl_opt2  = lg["pb_px"]   - pip * 2.0
+                sl_px    = max(sl_opt1, sl_opt2)
 
-        # Rule 6: entry + stop
-        entry     = float(tick.bid)                          # short = sell at bid
-        buffer    = sym_info.point * 10
-        stop_loss = ph_price + buffer
+                risk   = cur   - sl_px
+                reward = tp_px - cur
+                rr     = round(reward / risk, 2) if (risk > 0 and reward > 0) else 0.0
 
-        risk   = stop_loss - entry
-        reward = entry - target
-        if risk <= 0 or reward <= 0:
-            return None
-
-        rr = round(reward / risk, 2)
-        if rr < min_rr:
-            return None
-
-        strength = assess_signal_strength("SHORT", bb_pos, struct_count)
-
-        notes = [
-            f"Rule 1  — Trend: DOWNTREND  (lower highs + lower lows confirmed)",
-            f"Rule 2  — Waited for impulse move + pullback  (not entering impulse)",
-            f"Rule 3  — Trendline reference (pullback high): {ph_price:.5f}",
-            f"Rule 4  — Lowest low of structure (anchor): {sl_price:.5f}",
-            f"Rule 5  — Measured distance: {measured_distance:.5f}  "
-            f"({measured_distance / sl_price * 100:.2f}%)",
-            f"Rule 6  — Projected target: {target:.5f}",
-            f"Rule 7  — Entry on trendline rejection: price rolling over near {ph_price:.5f}",
-            f"Rule 8  — Bollinger Band position: {bb_pos}  "
-            f"(upper={last_bb_upper:.5f}  mid={last_bb_mid:.5f}  lower={last_bb_lower:.5f})",
-            f"Rule 9  — Structure #{struct_count} in trend  "
-            f"(1-2 = strongest, 4+ = exhaustion risk)",
-            f"Rule 10 — Setup valid while price stays below trendline ({ph_price:.5f})",
-        ]
-
-        return TradeSetup(
-            symbol=symbol,
-            timeframe=tf_str,
-            direction="SHORT",
-            entry=entry,
-            stop_loss=stop_loss,
-            target=target,
-            risk_reward=rr,
-            anchor_price=sl_price,
-            pullback_extreme=ph_price,
-            measured_distance=measured_distance,
-            bb_upper=last_bb_upper,
-            bb_middle=last_bb_mid,
-            bb_lower=last_bb_lower,
-            bb_position=bb_pos,
-            structure_count=struct_count,
-            signal_strength=strength,
-            setup_notes=notes,
-            invalidation_price=stop_loss,
-        )
-
-    # ════════════════════════════════════════════════════════════════════════
-    # LONG SETUP  (uptrend "Little RZY" — mirror image of short)
-    # ════════════════════════════════════════════════════════════════════════
-    elif trend == "UP":
-        # Anchor = most recent swing high (top of impulse)
-        sh_idx, sh_price = sw_highs[-1]
-
-        # Find pullback low: lowest low in candles after the swing high
-        seg_lows = lows[sh_idx:]
-        if len(seg_lows) < 2:
-            return None
-
-        pl_local_idx = int(np.argmin(seg_lows))
-        pl_price     = float(seg_lows[pl_local_idx])
-        pl_idx       = sh_idx + pl_local_idx
-
-        # Sanity: pullback must not break below the prior swing low (would break trend)
-        if sw_lows and pl_price <= sw_lows[-1][1]:
-            return None
-
-        in_zone = pl_price < current_price < sh_price
-
-        recent_closes = closes[max(0, len(closes) - 8):]
-        visited_trough = any(c <= pl_price * 1.03 for c in recent_closes)
-
-        recent_lo   = float(np.min(lows[max(0, len(lows) - 5):]))
-        bouncing_up = current_price > recent_lo * 1.001
-
-        if not (in_zone and visited_trough and bouncing_up):
-            return None
-
-        measured_distance = sh_price - pl_price
-        if measured_distance <= 0:
-            return None
-
-        target = sh_price + measured_distance
-
-        entry     = float(tick.ask)                          # long = buy at ask
-        buffer    = sym_info.point * 10
-        stop_loss = pl_price - buffer
-
-        risk   = entry - stop_loss
-        reward = target - entry
-        if risk <= 0 or reward <= 0:
-            return None
-
-        rr = round(reward / risk, 2)
-        if rr < min_rr:
-            return None
-
-        strength = assess_signal_strength("LONG", bb_pos, struct_count)
-
-        notes = [
-            f"Rule 1  — Trend: UPTREND  (higher highs + higher lows confirmed)",
-            f"Rule 2  — Waited for impulse move + pullback  (not entering impulse)",
-            f"Rule 3  — Trendline reference (pullback low): {pl_price:.5f}",
-            f"Rule 4  — Highest high of structure (anchor): {sh_price:.5f}",
-            f"Rule 5  — Measured distance: {measured_distance:.5f}  "
-            f"({measured_distance / sh_price * 100:.2f}%)",
-            f"Rule 6  — Projected target: {target:.5f}",
-            f"Rule 7  — Entry on trendline bounce: price recovering from {pl_price:.5f}",
-            f"Rule 8  — Bollinger Band position: {bb_pos}  "
-            f"(upper={last_bb_upper:.5f}  mid={last_bb_mid:.5f}  lower={last_bb_lower:.5f})",
-            f"Rule 9  — Structure #{struct_count} in trend  "
-            f"(1-2 = strongest, 4+ = exhaustion risk)",
-            f"Rule 10 — Setup valid while price stays above trendline ({pl_price:.5f})",
-        ]
-
-        return TradeSetup(
-            symbol=symbol,
-            timeframe=tf_str,
-            direction="LONG",
-            entry=entry,
-            stop_loss=stop_loss,
-            target=target,
-            risk_reward=rr,
-            anchor_price=sh_price,
-            pullback_extreme=pl_price,
-            measured_distance=measured_distance,
-            bb_upper=last_bb_upper,
-            bb_middle=last_bb_mid,
-            bb_lower=last_bb_lower,
-            bb_position=bb_pos,
-            structure_count=struct_count,
-            signal_strength=strength,
-            setup_notes=notes,
-            invalidation_price=stop_loss,
-        )
+                if rr >= cfg.min_rr:
+                    return TradeSetup(
+                        symbol=cfg.symbol, timeframe=cfg.timeframe,
+                        direction="LONG",
+                        entry=cur, stop_loss=sl_px, target=tp_px,
+                        risk_reward=rr,
+                        peak_px=lg["trough_px"], minor_px=lg["minor_px"],
+                        pb_peak_px=lg["pb_px"], midpoint=midpoint,
+                        x_move_pct=lg["x_move_pct"],
+                        session=session,
+                        setup_notes=_build_notes(
+                            "LONG", cur, sl_px, tp_px, rr,
+                            lg["trough_px"], lg["minor_px"],
+                            lg["pb_px"], midpoint,
+                            lg["x_move_pct"], session),
+                    )
 
     return None
 
-# ── Full scan ─────────────────────────────────────────────────────────────────
 
-def scan_all(
-    symbols: List[str],
-    timeframes: List[str],
-    candles: int = 200,
-    swing_n: int = 3,
-    min_rr: float = 1.5,
-) -> List[TradeSetup]:
-    """Scan every symbol × timeframe combination for setups."""
-    setups = []
-    for symbol in symbols:
-        for tf in timeframes:
-            df = fetch_candles(symbol, tf, candles)
-            if df is None:
-                continue
-            setup = find_rzy_setup(df, symbol, tf, swing_n, min_rr)
-            if setup:
-                setups.append(setup)
-    return setups
+# ── Human-readable setup notes ────────────────────────────────────────────────
 
-# ── Console dashboard ─────────────────────────────────────────────────────────
+def _build_notes(
+    direction: str,
+    entry: float, sl: float, tp: float, rr: float,
+    peak_px: float, minor_px: float, pb_px: float,
+    midpoint: float, x_move_pct: float,
+    session: str,
+) -> list:
+    peak_label  = "Peak HIGH"     if direction == "SHORT" else "Peak LOW (trough)"
+    minor_label = "Minor LOW"     if direction == "SHORT" else "Minor HIGH"
+    pb_label    = "Pullback HIGH" if direction == "SHORT" else "Pullback LOW"
 
-def print_dashboard(setups: List[TradeSetup], symbols: List[str], timeframes: List[str]):
-    """Print a clean scan summary to the terminal."""
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    return [
+        f"Timezone         : {session}",
+        f"Short or Long    : {direction}",
+        f"Current Price    : {entry:.5f}",
+        f"Take Profit Price: {tp:.5f}",
+        f"Stop Loss Price  : {sl:.5f}",
+        f"Risk : Reward    : 1:{rr:.2f}",
+        f"x% Move ({x_move_pct:.2f}%) — {peak_label}: {peak_px:.5f}",
+        f"{minor_label:<17}: {minor_px:.5f}",
+        f"Midpoint Price   : {midpoint:.5f}",
+        f"{pb_label:<17}: {pb_px:.5f}",
+    ]
+
+
+# ── Dashboard print ───────────────────────────────────────────────────────────
+
+def print_dashboard(setup: Optional[TradeSetup], cfg: StrategyConfig):
     sep = "─" * 62
-
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"\n{sep}")
-    print(f"  Marci Silfrain  —  Measured Move Trend Strategy EA")
-    print(f"  Scan      : {now}")
-    print(f"  Watching  : {', '.join(symbols)}")
-    print(f"  Timeframes: {', '.join(timeframes)}")
+    print(f"  Marci Silfrain  —  Measured Move v1.02")
+    print(f"  Scan : {now}  |  {cfg.symbol} [{cfg.timeframe}]")
     print(sep)
 
-    if not setups:
-        print("  No setups detected — monitoring for Little RZY structures...")
+    if setup is None:
+        print("  No setup detected — monitoring...")
         print(sep)
         return
 
-    for s in setups:
-        icon = {"HIGH": "[>>>]", "MEDIUM": "[ >>]", "LOW": "[  >]"}[s.signal_strength]
-        print(f"\n  {icon}  {s.signal_strength} CONFIDENCE  |  {s.direction}  "
-              f"{s.symbol}  [{s.timeframe}]")
-        print(f"         Entry    : {s.entry:.5f}")
-        print(f"         Stop     : {s.stop_loss:.5f}")
-        print(f"         Target   : {s.target:.5f}")
-        print(f"         R:R      : 1:{s.risk_reward}")
-        print(f"         BB Pos   : {s.bb_position}")
-        print(f"         Struct # : {s.structure_count}  (in current trend)")
+    for note in setup.setup_notes:
+        print(f"  {note}")
     print(sep)

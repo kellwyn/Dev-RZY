@@ -1,14 +1,15 @@
 """
-Marci Silfrain — Measured Move Trend Strategy  (Expert Advisor)
+Marci Silfrain — Measured Move Trend Strategy  v1.02  (Python Bot)
 
-Scans configured symbols and timeframes for "Little RZY" structures.
-Prints a full strategy checklist for every detected setup, then waits
-for your manual confirmation before sending any order to MT5.
+Mirrors MarciMeasuredMove_v1.02.mq5.
+Default parameters loaded from v102_settings_xauone.set (XAUUSD profile).
 
 Usage:
-  1. Copy .env.example to .env and fill in your symbols / settings
+  1. Copy .env.example to .env — fill in MT5 credentials if needed
   2. pip install -r requirements.txt
   3. python main.py
+
+Environment variables override all defaults (see .env.example).
 """
 
 import os
@@ -16,48 +17,111 @@ import time
 from dotenv import load_dotenv
 
 from bot.connection import connect, disconnect
-from bot.strategy   import scan_all, print_dashboard
-from bot.trader     import confirm_and_execute
+from bot.strategy   import StrategyConfig, find_setup, print_dashboard
+from bot.trader     import execute_setup
 
 load_dotenv()
 
-SYMBOLS       = [s.strip() for s in os.getenv("SYMBOLS",       "NAS100,US500").split(",")]
-TIMEFRAMES    = [t.strip() for t in os.getenv("TIMEFRAMES",    "H4,D1").split(",")]
-SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL",  "60"))
-RISK_PERCENT  = float(os.getenv("RISK_PERCENT", "1.0"))
-MIN_RR        = float(os.getenv("MIN_RR",       "1.5"))
-CANDLES       = int(os.getenv("CANDLES",        "200"))
-SWING_N       = int(os.getenv("SWING_LOOKBACK", "3"))
+# ── Configuration — defaults from v102_settings_xauone.set ───────────────────
 
-# Tracks setups already shown this session so the prompt isn't repeated
-# for the same setup on every scan tick.
+def _bool(key: str, default: bool) -> bool:
+    v = os.getenv(key)
+    if v is None:
+        return default
+    return v.strip().lower() in ("true", "1", "yes")
+
+def _int(key: str, default: int) -> int:
+    return int(os.getenv(key, default))
+
+def _float(key: str, default: float) -> float:
+    return float(os.getenv(key, default))
+
+def _str(key: str, default: str) -> str:
+    return os.getenv(key, default)
+
+
+cfg = StrategyConfig(
+    # Instrument
+    symbol         = _str("SYMBOL",          "XAUUSD"),
+    timeframe      = _str("TIMEFRAME",        "H1"),
+
+    # Execution
+    manual_confirm = _bool("MANUAL_CONFIRM",  False),   # false = auto-execute
+
+    # Risk Management
+    risk_pct       = _float("RISK_PERCENT",   0.15),
+    min_rr         = _float("MIN_RR",         0.0),     # 0 = disabled
+    max_lots       = _float("MAX_LOTS",        7.0),
+
+    # Strategy Parameters
+    candle_count   = _int("CANDLE_COUNT",     20),
+    big_x_move_pct = _float("BIG_X_MOVE_PCT", 0.5),
+    y_max_pct      = _float("Y_MAX_PCT",      600.0),   # capped to 90 at runtime
+    tp_multiplier  = _float("TP_MULTIPLIER",  0.5),
+
+    # Pullback Strength Gates
+    min_impulse_pips = _float("MIN_IMPULSE_PIPS", 5.0),
+    min_pullback_pct = _float("MIN_PULLBACK_PCT",  2.0),
+    max_pullback_pct = _float("MAX_PULLBACK_PCT", 70.0),
+
+    # ICT Session Filter (Rule 8) — off by default for XAUUSD
+    use_session      = _bool("USE_SESSION",    False),
+    gmt_offset       = _int("GMT_OFFSET",      0),
+    asian_start_h    = _int("ASIAN_START_H",   23),
+    asian_end_h      = _int("ASIAN_END_H",     9),
+    london_start_h   = _int("LONDON_START_H",  7),
+    london_end_h     = _int("LONDON_END_H",    16),
+    ny_start_h       = _int("NY_START_H",      12),
+    ny_end_h         = _int("NY_END_H",        17),
+
+    # Post-TP Cooldown (Rule 9)
+    use_post_tp_cooldown  = _bool("USE_POST_TP_COOLDOWN",  True),
+    post_tp_cooldown_mins = _int("POST_TP_COOLDOWN_MINS",  20),
+
+    # Big Move Cooldown (Rule 7)
+    use_big_move_cooldown  = _bool("USE_BIG_MOVE_COOLDOWN",  True),
+    big_move_pct           = _float("BIG_MOVE_PCT",          1.0),
+    big_move_cooldown_bars = _int("BIG_MOVE_COOLDOWN_BARS",  20),
+
+    # Key Level Filter (Rule 7)
+    use_key_level  = _bool("USE_KEY_LEVEL",  True),
+    key_level_pips = _float("KEY_LEVEL_PIPS", 10.0),
+
+    # Trade Settings
+    magic    = _int("MAGIC_NUMBER", 20260412),
+    slippage = _int("SLIPPAGE",     20),
+)
+
+SCAN_INTERVAL = _int("SCAN_INTERVAL", 60)   # seconds between scans
+
+# Tracks setups already shown to avoid re-prompting on the same signal
 _alerted: set = set()
 
 
 def _alert_key(setup) -> str:
-    """Unique fingerprint for a setup — resets if entry price changes."""
     return f"{setup.symbol}|{setup.timeframe}|{setup.direction}|{setup.entry:.5f}"
 
 
+# ── Main scan loop ────────────────────────────────────────────────────────────
+
 def run():
-    print(f"\n  Starting scanner...")
-    print(f"  Symbols   : {', '.join(SYMBOLS)}")
-    print(f"  Timeframes: {', '.join(TIMEFRAMES)}")
+    mode = "AUTO-EXECUTE" if not cfg.manual_confirm else "MANUAL CONFIRM"
+    print(f"\n  Starting scanner — {cfg.symbol} [{cfg.timeframe}]")
+    print(f"  Mode      : {mode}")
+    print(f"  Risk      : {cfg.risk_pct}%  |  Max lots: {cfg.max_lots}")
     print(f"  Interval  : every {SCAN_INTERVAL}s  |  Ctrl+C to stop\n")
 
     while True:
         try:
-            setups = scan_all(SYMBOLS, TIMEFRAMES, CANDLES, SWING_N, MIN_RR)
-            print_dashboard(setups, SYMBOLS, TIMEFRAMES)
+            setup = find_setup(cfg)
+            print_dashboard(setup, cfg)
 
-            for setup in setups:
+            if setup:
                 key = _alert_key(setup)
                 if key not in _alerted:
                     _alerted.add(key)
-                    confirm_and_execute(setup, RISK_PERCENT)
-
-            if not setups:
-                # Expire old alerts so fresh ones appear after conditions reset
+                    execute_setup(setup, cfg)
+            else:
                 _alerted.clear()
 
             time.sleep(SCAN_INTERVAL)
@@ -67,8 +131,8 @@ def run():
             break
         except SystemExit:
             break
-        except Exception as e:
-            print(f"  ERROR: {e}")
+        except Exception as exc:
+            print(f"  ERROR: {exc}")
             time.sleep(SCAN_INTERVAL)
 
 
