@@ -13,8 +13,15 @@ Environment variables override all defaults (see .env.example).
 """
 
 import os
+import sys
 import time
 from dotenv import load_dotenv
+
+# Force UTF-8 output so box-drawing characters render on Windows consoles
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 from bot.connection import connect, disconnect
 from bot.strategy   import StrategyConfig, find_setup, print_dashboard
@@ -43,7 +50,7 @@ def _str(key: str, default: str) -> str:
 cfg = StrategyConfig(
     # Instrument
     symbol         = _str("SYMBOL",          "XAUUSD"),
-    timeframe      = _str("TIMEFRAME",        "H1"),
+    timeframe      = _str("TIMEFRAME",        "M1"),
 
     # Execution
     manual_confirm = _bool("MANUAL_CONFIRM",  False),   # false = auto-execute
