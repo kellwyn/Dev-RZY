@@ -5,13 +5,18 @@ Mirrors MarciMeasuredMove_v1.02.mq5.
 Default parameters loaded from v102_settings_xauone.set (XAUUSD profile).
 
 Usage:
-  1. Copy .env.example to .env — fill in MT5 credentials if needed
+  1. Copy .env.example to .env — fill in MT5 credentials and broker profiles
   2. pip install -r requirements.txt
-  3. python main.py
+  3. python main.py                          # uses SYMBOL / MT5_PATH from .env
+     python main.py --profile metaquotes    # named broker profile
+     python main.py --profile blackbull-spot
+     python main.py --symbol XAUUSDp        # one-off symbol override
 
 Environment variables override all defaults (see .env.example).
+--profile and --symbol CLI args override environment variables.
 """
 
+import argparse
 import os
 import sys
 import time
@@ -28,6 +33,41 @@ from bot.strategy   import StrategyConfig, find_setup, print_dashboard
 from bot.trader     import execute_setup
 
 load_dotenv()
+
+# ── CLI arguments ─────────────────────────────────────────────────────────────
+
+_parser = argparse.ArgumentParser(description="Marci Measured Move Bot v1.02")
+_parser.add_argument("--profile", metavar="NAME",
+                     help="Broker profile name defined in .env (e.g. metaquotes, blackbull-spot)")
+_parser.add_argument("--symbol",  metavar="SYM",
+                     help="Symbol override — takes precedence over profile and .env")
+_args = _parser.parse_args()
+
+# ── Profile resolution ────────────────────────────────────────────────────────
+# Profiles are defined in .env as PROFILE_<NAME>_SYMBOL and PROFILE_<NAME>_MT5_PATH.
+# A profile sets MT5_PATH and SYMBOL in the environment before cfg is built,
+# so all downstream _str/_int/_float helpers pick them up automatically.
+
+if _args.profile:
+    key = _args.profile.upper().replace("-", "_")
+    sym  = os.getenv(f"PROFILE_{key}_SYMBOL")
+    path = os.getenv(f"PROFILE_{key}_MT5_PATH")
+    login    = os.getenv(f"PROFILE_{key}_MT5_LOGIN")
+    password = os.getenv(f"PROFILE_{key}_MT5_PASSWORD")
+    server   = os.getenv(f"PROFILE_{key}_MT5_SERVER")
+    if sym is None:
+        print(f"  ERROR: profile '{_args.profile}' not found in .env "
+              f"(expected PROFILE_{key}_SYMBOL)")
+        sys.exit(1)
+    if sym:      os.environ["SYMBOL"]       = sym
+    if path:     os.environ["MT5_PATH"]     = path
+    if login:    os.environ["MT5_LOGIN"]    = login
+    if password: os.environ["MT5_PASSWORD"] = password
+    if server:   os.environ["MT5_SERVER"]   = server
+
+# --symbol always wins over profile / .env
+if _args.symbol:
+    os.environ["SYMBOL"] = _args.symbol
 
 # ── Configuration — defaults from v102_settings_xauone.set ───────────────────
 

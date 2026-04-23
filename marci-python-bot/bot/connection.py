@@ -1,5 +1,6 @@
 """
 MT5 connection management.
+Supports multiple parallel MT5 terminals via MT5_PATH in .env.
 If MT5 is already open and logged in, initialize() with no args will attach to it.
 Credentials in .env are only needed if starting a fresh session.
 """
@@ -12,11 +13,15 @@ def connect():
     login    = os.getenv("MT5_LOGIN")
     password = os.getenv("MT5_PASSWORD")
     server   = os.getenv("MT5_SERVER")
+    path     = os.getenv("MT5_PATH")
 
+    kwargs = {}
+    if path:
+        kwargs["path"] = path
     if login and password and server:
-        ok = mt5.initialize(login=int(login), password=password, server=server)
-    else:
-        ok = mt5.initialize()
+        kwargs.update(login=int(login), password=password, server=server)
+
+    ok = mt5.initialize(**kwargs) if kwargs else mt5.initialize()
 
     if not ok:
         raise RuntimeError(f"MT5 connection failed: {mt5.last_error()}")
