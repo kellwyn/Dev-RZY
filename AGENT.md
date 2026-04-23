@@ -302,3 +302,126 @@ Memory is managed via LangChain MCP server. Add to `.claude/settings.json` under
 4. `mt5.last_error()` — always the first debug step for any MT5 API failure
 5. MT5 Python API docs: https://www.mql5.com/en/docs/integration/python_metatrader5
 6. MQL5 reference: https://www.mql5.com/en/docs
+
+---
+
+## AlgoPure — Execution Algorithm Bot
+
+**AlgoPure** is a natural-language execution algorithm (not a signal bot). A human makes the trading decision; the bot executes, manages, and reports.
+
+### Commands
+
+```bash
+# Start the execution REPL
+python main.py --symbol USTEC.f --profile blackbull-spot
+python main.py --symbol XAUUSDp --no-confirm   # skip manual confirm (demo only)
+
+# Signal lab — terminal snapshot
+python algopure-signal-lab/dashboard.py USTEC.f
+
+# Signal lab — Streamlit web dashboard (port 8501)
+cd algopure-signal-lab
+python -m streamlit run dashboard_web.py -- --symbol USTEC.f
+python -m streamlit run dashboard_web.py -- --symbol XAUUSDp --watch 30
+```
+
+### REPL Command Reference
+
+```
+buy/long  [SYMBOL] LOTS [limit|stop at PRICE] [sl VALUE [unit]] [tp VALUE [unit]]
+sell/short [SYMBOL] LOTS [limit|stop at PRICE] [sl VALUE [unit]] [tp VALUE [unit]]
+
+SL/TP units: price (absolute) | points (ticks) | pips (10×tick) | % (pct of entry)
+If value > 100 with no unit → treated as price. If ≤ 100 → treated as points.
+
+set sl VALUE [unit] [on ticket N]    — move stop loss on live position
+set tp VALUE [unit] [on ticket N]    — move take profit
+modify ticket N sl VALUE tp VALUE    — modify both at once
+trail[ing] N points [on ticket N]    — activate trailing stop
+close ticket N  /  close all         — close position(s)
+hedge [SYMBOL] N lots                — open opposite position
+kelly [for SYMBOL]                   — show Kelly criterion sizing table
+status   — show all open positions + account summary
+help     — full command reference
+exit     — disconnect and quit
+```
+
+### Execution Speed Design
+
+Order path is optimized to **2 MT5 calls** (tick + order_send):
+
+| Step | Before | After |
+|---|---|---|
+| symbol_info calls per order | 5–6 | 0 (cached, 5-min TTL) |
+| tick calls per order | 2 | 1 (fresh at execution) |
+| Total MT5 round-trips | 7 | 2 |
+
+Key functions in `bot/trader.py`:
+- `_cached_sym_info(symbol)` — cache-first symbol info (filling mode, tick_size, vol constraints)
+- `warm_symbol(symbol)` — call on startup to pre-populate cache
+- `_filling_mode(info)` — maps `filling_mode` bitmask to `ORDER_FILLING_*` constant
+- All `send_*_order()` accept `_info=` kwarg to share one cached lookup
+
+**Filling mode pattern** (BlackBull and most brokers):
+```python
+# symbol.filling_mode bitmask: bit0=FOK, bit1=IOC
+# ORDER_FILLING constants:      FOK=0,   IOC=1,   RETURN=2
+fm = info.filling_mode
+fill = mt5.ORDER_FILLING_FOK if fm & 1 else (mt5.ORDER_FILLING_IOC if fm & 2 else mt5.ORDER_FILLING_RETURN)
+```
+
+### Parallel Signal Lab Execution
+
+After every successful order, `_fire_signal_lab(symbol)` launches a daemon thread that calls `fast_snapshot.run()` — a lightweight live-position snapshot (< 500ms, no historical fetch). Output prints ~150ms after the order confirmation so it doesn't interleave.
+
+The full Streamlit dashboard (`dashboard_web.py`) runs separately and auto-refreshes every N seconds (sidebar toggle). Historical data is cached for 5 minutes.
+
+```
+Order confirmed (T=0ms)
+order_send fires  (T=~30ms)
+"ORDER EXECUTED #xxxxx" prints  (T=~50ms)
+Signal lab snapshot fires in thread  (T=~200ms)  ← parallel
+Next REPL prompt available  (T=~50ms)  ← doesn't wait for lab
+```
+
+### Signal Lab Files
+
+| File | Purpose |
+|---|---|
+| `dashboard.py` | Rich terminal dashboard — all tables, no web server |
+| `dashboard_web.py` | Streamlit web dashboard at localhost:8501 |
+| `fast_snapshot.py` | Lightweight live-position snapshot, < 500ms, no historical fetch |
+| `market_analysis.py` | 48-slot market char + ICT RTH session computations (pure pandas) |
+| `live_metrics.py` | Risk metrics, 5 scenarios, SL/TP alternatives, hedge break-even |
+| `fetcher.py` | MT5 OHLCV fetch → UTC timestamps |
+| `config.py` | LabConfig — all times UTC, COMEX RTH = 13:30–20:00 UTC for gold |
+
+### Timezone Reference (AlgoPure)
+
+All timestamps are **UTC** (fetcher uses `pd.to_datetime(..., utc=True)`).
+
+| Instrument | ICT RTH window (UTC) | US/Eastern equiv |
+|---|---|---|
+| Gold (XAUUSD / XAUUSDp / GOLD.f) | 13:30–20:00 | 09:30–16:00 ET |
+| NQ / ES / US equities (USTEC.f) | 14:30–21:00 | 09:30–16:00 ET |
+| The 48-slot chart labels are UTC clock hours | — | — |
+
+### AlgoPure Skills
+
+| Skill | Trigger | Description |
+|---|---|---|
+| `/deploy-ea` | After editing `.mq5` | Copies EA to MetaTrader Experts folder |
+| `/diagnostic-scan` | Bot reports "No setup" | One-shot filter diagnostic |
+| `/slot-market-char SYMBOL [DURATION]` | Market analysis needed | 48-slot UTC character analysis |
+| `/ict-session-analysis SYMBOL` | Session analysis needed | 20-day RTH session with 30d baselines |
+| `/ict-rth-table SYMBOL` | Focused RTH metrics | RTH-only aggregation, anomaly digest |
+
+### AlgoPure Subagents
+
+| Task | Command |
+|---|---|
+| Check MT5 connection + account | `use the bot-health-check subagent` |
+| Review changed bot/EA code | `use the code-reviewer subagent` |
+| Security scan before commit | `use the security-reviewer subagent` |
+| Deploy EA to MetaTrader | `use the ea-deployer subagent` |
+| Commit and push to GitHub | `use the git-push subagent` |
