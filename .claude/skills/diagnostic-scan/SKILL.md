@@ -3,17 +3,31 @@ name: diagnostic-scan
 description: Runs a one-shot filter diagnostic on the active bot to identify which rules are passing or blocking. Use when the bot reports "No setup detected" and you need to know why.
 ---
 
-Run a filter-by-filter diagnostic scan on the bot for symbol $ARGUMENTS (default: GOLD.f).
+Run a filter-by-filter diagnostic scan on the bot for symbol $ARGUMENTS (default: auto-detect).
 
-1. Determine the symbol — use $ARGUMENTS if provided, otherwise check the running bot's config or default to `GOLD.f`
+1. **Determine the symbol** — use $ARGUMENTS if provided, otherwise auto-detect from the running bot:
 
-2. Find the bot directory in the current repo:
+```bash
+# On Windows: read command-line args of any running Python process to find --symbol
+powershell -Command "Get-WmiObject Win32_Process -Filter \"Name='python.exe' OR Name='python3.exe'\" | Select-Object ProcessId, CommandLine | Format-List"
+```
+
+Parse the output:
+- Look for `main.py` processes with `--symbol SYM` or `--profile NAME` arguments
+- If `--symbol XAUUSDp` is visible → use `XAUUSDp`
+- If `--profile blackbull-spot` → check `.env` for `PROFILE_BLACKBULL_SPOT_SYMBOL`
+- If no running bot found, read `main.py` cfg defaults (usually `XAUUSD`)
+- **Never default to `GOLD.f`** — that is a MetaQuotes demo symbol only
+
+2. **Check if the bot is already running** — if it is, its own terminal output shows live filter state. Check TaskOutput or ask the user to copy the current dashboard line. Only run a separate diagnostic if the live terminal isn't accessible.
+
+3. **Find the bot directory**:
 ```bash
 BOT_DIR=$(find . -maxdepth 1 -type d -name "*-python-bot" | head -1)
 echo "Bot dir: $BOT_DIR"
 ```
 
-3. Run the following diagnostic from that directory:
+4. **Run the diagnostic** — substitute the detected symbol for `SYMBOL_HERE`:
 
 ```bash
 cd "$BOT_DIR" && python -u -c "
@@ -29,12 +43,20 @@ from bot.strategy import (
     _pip_size, get_current_session
 )
 from main import cfg
+print(f'Symbol          : {cfg.symbol}')
 df    = _fetch(cfg.symbol, cfg.timeframe, cfg.candle_count)
+if df is None:
+    print(f'FETCH FAILED — {mt5.last_error()}')
+    print('  Check: symbol name correct? Symbol visible in Market Watch?')
+    mt5.shutdown()
+    exit()
 highs = df['h'].values.astype(float); lows = df['l'].values.astype(float)
 closes= df['c'].values.astype(float); opens= df['o'].values.astype(float)
 pip   = _pip_size(cfg.symbol)
 tick  = mt5.symbol_info_tick(cfg.symbol)
 print(f'bid/ask         : {tick.bid:.2f} / {tick.ask:.2f}')
+if tick.bid == 0.0:
+    print('  WARNING: bid=0 — symbol may not be in Market Watch or market is closed')
 print(f'Gap guard       : {_gap_guard(df)}')
 print(f'Session         : {is_in_trading_session(cfg)} ({get_current_session(cfg)})')
 check_and_update_tp_state(cfg)
@@ -57,7 +79,9 @@ mt5.shutdown()
 "
 ```
 
-3. Interpret the output:
+5. **Interpret the output**:
+   - **FETCH FAILED** — symbol name wrong or not in Market Watch; check broker suffix (`XAUUSDp`, `XAUUSD`, `GOLD.f`)
+   - **bid=0 WARNING** — symbol not visible in Market Watch or market is closed
    - **Gap guard FAIL** — most recent bar opened outside prior bar's range; clears next bar
    - **Session blocked** — ICT session filter active; check `USE_SESSION` setting
    - **Post-TP cooldown** — TP exit within cooldown window + big move; wait for cooldown to expire

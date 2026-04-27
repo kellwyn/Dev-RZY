@@ -56,6 +56,9 @@ class LabConfig:
     # ── TP outcome lookahead ─────────────────────────────────────────────────
     tp_lookahead_bars: int = 50    # max forward bars to find TP or SL hit
 
+    # ── Entry zone candle limit ──────────────────────────────────────────────
+    max_zone_candles: int = 3    # max candles allowed in minor↔pb zone
+
     # ── Indicator periods ─────────────────────────────────────────────────────
     adx_period:    int = 14
     rsi_period:    int = 14

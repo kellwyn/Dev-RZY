@@ -39,7 +39,8 @@
 //|    · Rule 3: Midpoint-based TP (70% of mid→minor dist)        |
 //|              SL = tighter of midpoint±2pip / pbPeak±2pip       |
 //|    · Rule 4: Pullback strength gates (depth + min impulse)     |
-//|    · Rule 5: Momentum confirmation toward minor point           |
+//|    · Rule 5: Zone candle gate + immediate entry at minor low    |
+//|              (replaces 2-bar momentum confirmation)             |
 //|    · Rule 6: Entry zone between minor point and pullback peak   |
 //|    · Rule 7: Key level + Big Move Cooldown filters (opt)       |
 //|    · Rule 8: ICT session filter (Asian/London/NY AM + pre-mkt) |
@@ -77,6 +78,9 @@ input double InpMinImpulsePips    = 5.0;    // Minimum impulse size (pips) — f
 input double InpMinPullbackPct    = 2.0;    // Min pullback retracement % of peak→minor distance
 input double InpMaxPullbackPct    = 70.0;   // Max pullback retracement % (deeper = weakening)
 
+input group "=== Entry Zone Candle Gate (Rule 5) ==="
+input int    InpMaxZoneCandles    = 3;      // Max candles allowed to close between minor low and pb high
+
 input group "=== ICT Session Filter (Rule 8) ==="
 input bool   InpUseSessionFilter  = false;  // Only trade during active ICT sessions
 input int    InpGMTOffset         = 0;      // Broker server offset from GMT (e.g. +2 = EET)
@@ -108,6 +112,12 @@ input group "=== Trade Settings ==="
 input int    InpMagicNumber       = 20260412;
 input int    InpSlippage          = 20;
 
+input group "=== Display ==="
+input bool   InpDrawObjects = true;           // Draw structure and order levels on chart
+input color  InpXMoveColor  = clrSteelBlue;   // X% peak highlight (40% opacity fill)
+input color  InpMinorColor  = clrOrange;       // Minor low / minor high dotted line
+input color  InpPBColor     = clrGold;         // Pullback peak / trough dotted line
+
 //── Globals ───────────────────────────────────────────────────────
 CTrade   Trade;
 datetime g_lastTPExitTime  = 0;
@@ -135,6 +145,7 @@ int OnInit()
 //+------------------------------------------------------------------+
 void OnDeinit(const int reason)
 {
+    ObjectsDeleteAll(0, "RZY_");
     ObjectsDeleteAll(0, "Marci_");
     Comment("");
 }
@@ -230,28 +241,27 @@ void RunStrategy()
         int    peakBar  = -1; double peakPx  = 0;
         int    minorBar = -1; double minorPx = 0;
         int    pbBar    = -1; double pbPx    = 0;
+        double effectivePbPx = 0;
 
         if(FindShortSetup(highs, lows, InpCandleCount, InpBigXMovePct,
                           yMaxPct, InpMinPullbackPct, InpMaxPullbackPct,
                           pipVal, InpMinImpulsePips,
                           peakBar, peakPx, minorBar, minorPx, pbBar, pbPx)
-           && ConfirmShortMomentum(closes, pbBar))
+           && ConfirmShortEntry(closes, highs, lows, pbBar, peakPx, minorPx,
+                                InpMaxPullbackPct, InpMaxZoneCandles, effectivePbPx))
         {
             double curPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-
-            // Rule 6: price must be inside the entry zone
-            bool inZone   = (curPrice > minorPx && curPrice < pbPx);
             bool filtered = (InpUseBigMoveCooldown && IsBigMoveCooldown("SHORT", opens, closes, InpCandleCount))
                          || (InpUseKeyLevelFilter  && IsNearKeyLevel(curPrice, "SHORT"));
 
-            if(inZone && !filtered)
+            if(!filtered)
             {
-                // Rule 3: calculate TP and SL
+                // Rule 3: calculate TP and SL using effectivePbPx
                 double midpoint     = (peakPx + minorPx) / 2.0;
                 double distMidMinor = midpoint - minorPx;
                 double tpPx         = minorPx - distMidMinor * (InpTPMultiplier / 100.0);
-                double slOpt1       = midpoint + pipVal * 2.0;
-                double slOpt2       = pbPx     + pipVal * 2.0;
+                double slOpt1       = midpoint       + pipVal * 2.0;
+                double slOpt2       = effectivePbPx  + pipVal * 2.0;
                 double slPx         = MathMin(slOpt1, slOpt2);
 
                 double risk   = slPx    - curPrice;
@@ -262,8 +272,10 @@ void RunStrategy()
                 {
                     double lots    = CalcLots(curPrice, slPx);
                     string summary = BuildSummary("SHORT", curPrice, slPx, tpPx, rr,
-                                                  peakPx, minorPx, pbPx, midpoint, lots);
-                    DrawLevels(curPrice, slPx, tpPx, "SHORT");
+                                                  peakPx, minorPx, effectivePbPx, midpoint, lots);
+                    DrawRZYSetup(peakBar, minorPx, peakPx,
+                                 minorPx, effectivePbPx,
+                                 curPrice, slPx, tpPx, rr, "SHORT");
                     Comment(summary);
 
                     if(InpManualConfirm)
@@ -289,52 +301,51 @@ void RunStrategy()
         int    troughBar = -1; double troughPx = 0;
         int    minorBar  = -1; double minorPx  = 0;
         int    pbBar     = -1; double pbPx     = 0;
+        double effectivePbPx = 0;
 
         if(FindLongSetup(highs, lows, InpCandleCount, InpBigXMovePct,
                          yMaxPct, InpMinPullbackPct, InpMaxPullbackPct,
                          pipVal, InpMinImpulsePips,
-                         troughBar, troughPx, minorBar, minorPx, pbBar, pbPx))
+                         troughBar, troughPx, minorBar, minorPx, pbBar, pbPx)
+           && ConfirmLongEntry(closes, highs, lows, pbBar, troughPx, minorPx,
+                               InpMaxPullbackPct, InpMaxZoneCandles, effectivePbPx))
         {
-            if(ConfirmLongMomentum(closes, pbBar))
+            double curPrice = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+
+            if(InpUseBigMoveCooldown && IsBigMoveCooldown("LONG", opens, closes, InpCandleCount))
+                return;
+            if(InpUseKeyLevelFilter  && IsNearKeyLevel(curPrice, "LONG"))
+                return;
+
+            double midpoint     = (troughPx + minorPx) / 2.0;
+            double distMidMinor = minorPx - midpoint;
+            double tpPx         = minorPx + distMidMinor * (InpTPMultiplier / 100.0);
+            double slOpt1       = midpoint      - pipVal * 2.0;
+            double slOpt2       = effectivePbPx - pipVal * 2.0;
+            double slPx         = MathMax(slOpt1, slOpt2);
+
+            double risk   = curPrice - slPx;
+            double reward = tpPx     - curPrice;
+            if(risk <= 0 || reward <= 0) return;
+            double rr = reward / risk;
+            if(rr < InpMinRR) return;
+
+            double lots    = CalcLots(curPrice, slPx);
+            string summary = BuildSummary("LONG", curPrice, slPx, tpPx, rr,
+                                          troughPx, minorPx, effectivePbPx, midpoint, lots);
+
+            DrawRZYSetup(troughBar, troughPx, minorPx,
+                         minorPx, effectivePbPx,
+                         curPrice, slPx, tpPx, rr, "LONG");
+            Comment(summary);
+
+            if(InpManualConfirm)
+                Alert("MARCI EA  >>>  LONG SETUP on ", _Symbol, "\n\n", summary);
+            else
             {
-                double curPrice = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-
-                if(curPrice < minorPx && curPrice > pbPx)
-                {
-                    if(InpUseBigMoveCooldown && IsBigMoveCooldown("LONG", opens, closes, InpCandleCount))
-                        return;
-                    if(InpUseKeyLevelFilter  && IsNearKeyLevel(curPrice, "LONG"))
-                        return;
-
-                    double midpoint     = (troughPx + minorPx) / 2.0;
-                    double distMidMinor = minorPx - midpoint;             // > 0 for LONG
-                    double tpPx         = minorPx + distMidMinor * (InpTPMultiplier / 100.0);
-                    double slOpt1       = midpoint  - pipVal * 2.0;
-                    double slOpt2       = pbPx      - pipVal * 2.0;
-                    double slPx         = MathMax(slOpt1, slOpt2);        // tighter (higher) stop
-
-                    double risk   = curPrice - slPx;
-                    double reward = tpPx     - curPrice;
-                    if(risk <= 0 || reward <= 0) return;
-                    double rr = reward / risk;
-                    if(rr < InpMinRR) return;
-
-                    double lots    = CalcLots(curPrice, slPx);
-                    string summary = BuildSummary("LONG", curPrice, slPx, tpPx, rr,
-                                                  troughPx, minorPx, pbPx, midpoint, lots);
-
-                    DrawLevels(curPrice, slPx, tpPx, "LONG");
-                    Comment(summary);
-
-                    if(InpManualConfirm)
-                        Alert("MARCI EA  >>>  LONG SETUP on ", _Symbol, "\n\n", summary);
-                    else
-                    {
-                        if(lots > 0)
-                            if(!Trade.Buy(lots, _Symbol, curPrice, slPx, tpPx, "Marci_MM_LONG"))
-                                Print("Order failed: ", Trade.ResultRetcodeDescription());
-                    }
-                }
+                if(lots > 0)
+                    if(!Trade.Buy(lots, _Symbol, curPrice, slPx, tpPx, "Marci_MM_LONG"))
+                        Print("Order failed: ", Trade.ResultRetcodeDescription());
             }
         }
     }
@@ -513,24 +524,98 @@ bool FindLongSetup(
 }
 
 //+------------------------------------------------------------------+
-//| Rule 5: Confirm SHORT momentum from pullback peak               |
-//| Requires at least 2 closed bars after the pullback peak         |
-//| and declining closes since then                                 |
+//| Rule 5: Confirm SHORT entry from pullback peak                  |
+//|                                                                  |
+//| Scans every completed bar after the pb peak (indices pbBar-1    |
+//| down to 0 in AsSeries order):                                   |
+//|   - Close > effectivePbPx: new higher pb peak. Recalculate      |
+//|     depth; if within maxPbPct promote effectivePbPx, else fail. |
+//|   - Close < minorPx: structure broken — fail.                   |
+//|   - Otherwise: zone candle; fail if count > maxZoneCandles.     |
+//|                                                                  |
+//| Then checks live Bid:                                           |
+//|   - Bid ≤ minorPx  → immediate entry (bar declined to minor).   |
+//|   - minorPx < Bid < effectivePbPx → standard entry zone.       |
 //+------------------------------------------------------------------+
-bool ConfirmShortMomentum(const double &closes[], int pbBar)
+bool ConfirmShortEntry(
+    const double &closes[],
+    const double &highs[],
+    const double &lows[],
+    int pbBar, double peakPx, double minorPx,
+    double maxPbPct, int maxZoneCandles,
+    double &effectivePbPx)
 {
-    if(pbBar < 2) return false;
-    // Most recent 2 bars closing lower; current close below pb close level
-    return (closes[0] < closes[1] && closes[1] <= closes[pbBar]);
+    effectivePbPx = highs[pbBar];
+    int zoneCount = 0;
+
+    for(int i = pbBar - 1; i >= 0; i--)
+    {
+        double c = closes[i];
+        double h = highs[i];
+
+        if(c > effectivePbPx)
+        {
+            double denom    = peakPx - minorPx;
+            double newDepth = (denom > 0) ? (h - minorPx) / denom * 100.0 : 0.0;
+            if(newDepth > maxPbPct) return false;
+            effectivePbPx = h;
+        }
+        else if(c < minorPx)
+        {
+            return false;
+        }
+        else
+        {
+            zoneCount++;
+            if(zoneCount > maxZoneCandles) return false;
+        }
+    }
+
+    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+    if(bid <= minorPx)              return true;
+    return (bid > minorPx && bid < effectivePbPx);
 }
 
 //+------------------------------------------------------------------+
-//| Rule 5: Confirm LONG momentum from pullback trough              |
+//| Rule 5: Confirm LONG entry from pullback trough (mirror)        |
 //+------------------------------------------------------------------+
-bool ConfirmLongMomentum(const double &closes[], int pbBar)
+bool ConfirmLongEntry(
+    const double &closes[],
+    const double &highs[],
+    const double &lows[],
+    int pbBar, double troughPx, double minorPx,
+    double maxPbPct, int maxZoneCandles,
+    double &effectivePbPx)
 {
-    if(pbBar < 2) return false;
-    return (closes[0] > closes[1] && closes[1] >= closes[pbBar]);
+    effectivePbPx = lows[pbBar];
+    int zoneCount = 0;
+
+    for(int i = pbBar - 1; i >= 0; i--)
+    {
+        double c = closes[i];
+        double l = lows[i];
+
+        if(c < effectivePbPx)
+        {
+            double denom    = minorPx - troughPx;
+            double newDepth = (denom > 0) ? (minorPx - l) / denom * 100.0 : 0.0;
+            if(newDepth > maxPbPct) return false;
+            effectivePbPx = l;
+        }
+        else if(c > minorPx)
+        {
+            return false;
+        }
+        else
+        {
+            zoneCount++;
+            if(zoneCount > maxZoneCandles) return false;
+        }
+    }
+
+    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+    if(ask >= minorPx)              return true;
+    return (ask < minorPx && ask > effectivePbPx);
 }
 
 //+------------------------------------------------------------------+
@@ -756,31 +841,91 @@ string BuildSummary(
 }
 
 //+------------------------------------------------------------------+
-//| Draw Entry / SL / TP horizontal lines on chart                  |
+//| Chart drawing — RZY structure + order levels                    |
 //+------------------------------------------------------------------+
-void DrawLevels(double entry, double sl, double tp, string dir)
+
+// Bulk-delete all objects whose name starts with prefix
+void DeleteObjects(string prefix)
 {
-    ObjectsDeleteAll(0, "Marci_");
-
-    datetime t1 = iTime(_Symbol, PERIOD_CURRENT, 20);
-    datetime t2 = iTime(_Symbol, PERIOD_CURRENT,  1);
-
-    color entryClr = (dir == "SHORT") ? clrOrange : clrDodgerBlue;
-
-    CreateTrendLine("Marci_Entry",  entry, t1, t2, entryClr, STYLE_SOLID, 2);
-    CreateTrendLine("Marci_SL",     sl,    t1, t2, clrRed,   STYLE_DASH,  1);
-    CreateTrendLine("Marci_Target", tp,    t1, t2, clrLime,  STYLE_DASH,  1);
+    for(int i = ObjectsTotal(0) - 1; i >= 0; i--)
+    {
+        string name = ObjectName(0, i);
+        if(StringFind(name, prefix) == 0) ObjectDelete(0, name);
+    }
 }
 
-void CreateTrendLine(string name, double price,
-                     datetime t1, datetime t2,
-                     color clr, ENUM_LINE_STYLE style, int width)
+// Filled rectangle — used for the X% peak highlight (40% opacity)
+void DrawZone(string name, datetime t1, double price1,
+              datetime t2, double price2, color clr)
 {
+    if(!InpDrawObjects) return;
     if(ObjectFind(0, name) >= 0) ObjectDelete(0, name);
-    ObjectCreate(0, name, OBJ_TREND, 0, t1, price, t2, price);
-    ObjectSetInteger(0, name, OBJPROP_COLOR,     clr);
-    ObjectSetInteger(0, name, OBJPROP_STYLE,     style);
-    ObjectSetInteger(0, name, OBJPROP_WIDTH,     width);
-    ObjectSetInteger(0, name, OBJPROP_RAY_RIGHT, false);
-    ObjectSetString (0, name, OBJPROP_TOOLTIP,   name + ": " + DoubleToString(price, _Digits));
+    ObjectCreate(0, name, OBJ_RECTANGLE, 0, t1, price1, t2, price2);
+    ObjectSetInteger(0, name, OBJPROP_COLOR,      clr);
+    ObjectSetInteger(0, name, OBJPROP_FILL,       true);
+    ObjectSetInteger(0, name, OBJPROP_BACK,       true);
+    ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
+}
+
+// Full-chart horizontal line
+void DrawHLine(string name, double price, color clr, int width,
+               ENUM_LINE_STYLE style)
+{
+    if(!InpDrawObjects) return;
+    if(ObjectFind(0, name) >= 0) ObjectDelete(0, name);
+    ObjectCreate(0, name, OBJ_HLINE, 0, 0, price);
+    ObjectSetInteger(0, name, OBJPROP_COLOR,      clr);
+    ObjectSetInteger(0, name, OBJPROP_WIDTH,      width);
+    ObjectSetInteger(0, name, OBJPROP_STYLE,      style);
+    ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
+    ObjectSetString (0, name, OBJPROP_TOOLTIP,    name + ": " + DoubleToString(price, _Digits));
+}
+
+// Text label at a specific bar/price
+void DrawLabel(string name, datetime t, double price, string text, color clr)
+{
+    if(!InpDrawObjects) return;
+    if(ObjectFind(0, name) >= 0) ObjectDelete(0, name);
+    ObjectCreate(0, name, OBJ_TEXT, 0, t, price);
+    ObjectSetString (0, name, OBJPROP_TEXT,       text);
+    ObjectSetInteger(0, name, OBJPROP_COLOR,      clr);
+    ObjectSetInteger(0, name, OBJPROP_FONTSIZE,   8);
+    ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
+}
+
+// Draw all RZY chart objects for a confirmed setup.
+//   xBar          — bar index of the peak (SHORT) or trough (LONG)
+//   xLow / xHigh  — price range of the peak bar highlight
+//                   SHORT: xLow=minorPx,  xHigh=peakPx
+//                   LONG:  xLow=troughPx, xHigh=minorPx
+//   minorPx       — exhaustion low/high (entry zone floor / TP reference)
+//   pbPx          — effective pullback level (entry zone ceiling / SL reference)
+void DrawRZYSetup(
+    int    xBar,    double xLow,  double xHigh,
+    double minorPx, double pbPx,
+    double entry,   double sl,    double tp,
+    double rr,      string direction)
+{
+    if(!InpDrawObjects) return;
+    DeleteObjects("RZY_");
+
+    // X% peak zone — single peak-bar highlight at 40% opacity
+    datetime tLeft  = iTime(_Symbol, PERIOD_CURRENT, xBar + 1);
+    datetime tRight = iTime(_Symbol, PERIOD_CURRENT, xBar);
+    DrawZone("RZY_XZone", tLeft, xLow, tRight, xHigh, InpXMoveColor);
+
+    // Structure levels
+    DrawHLine("RZY_Minor",  minorPx, InpMinorColor, 1, STYLE_DOT);
+    DrawHLine("RZY_PBPeak", pbPx,    InpPBColor,    1, STYLE_DOT);
+
+    // Order levels
+    DrawHLine("RZY_Entry", entry, clrDodgerBlue, 2, STYLE_SOLID);
+    DrawHLine("RZY_SL",    sl,    clrRed,        1, STYLE_DASH);
+    DrawHLine("RZY_TP",    tp,    clrLime,       1, STYLE_DASH);
+
+    // Label at entry bar showing direction + SL / TP / R:R
+    color lblClr = (direction == "SHORT") ? clrOrange : clrLimeGreen;
+    DrawLabel("RZY_Lbl", iTime(_Symbol, PERIOD_CURRENT, 0), entry,
+              StringFormat(" %s  SL:%.2f  TP:%.2f  RR:1:%.1f", direction, sl, tp, rr),
+              lblClr);
 }

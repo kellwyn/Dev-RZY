@@ -360,6 +360,177 @@ New repo baseline is always `v1.00`. Never delete old version files — keep the
 
 ---
 
+## SKILL: CHART_DRAWING
+
+Chart drawing helpers for MQL5 EAs. Controlled by `InpDrawObjects`. All objects share a strategy prefix (e.g. `RZY_`) so they can be bulk-deleted cleanly.
+
+---
+
+### DEV_RZY — MarciMeasuredMove_v1.02
+
+**What gets drawn on a detected setup:**
+
+| Object | Type | Colour input | Condition | What it marks |
+|---|---|---|---|---|
+| `RZY_XZone` | Filled rectangle, 40% opacity | `InpXMoveColor` (SteelBlue) | X% gate passed | Impulse region from prior-low bar to peak bar |
+| `RZY_Minor` | Dotted H-line | `InpMinorColor` (Orange) | Structure found | Minor low — exhaustion trough |
+| `RZY_PBPeak` | Dotted H-line | `InpPBColor` (Gold) | Structure found | Pullback peak high — entry zone ceiling |
+| `RZY_Entry` | Solid H-line, width 2 | `clrDodgerBlue` | On order | Entry price |
+| `RZY_SL` | Dashed H-line | `clrRed` | On order | Stop loss |
+| `RZY_TP` | Dashed H-line | `clrLime` | On order | Take profit |
+| `RZY_Lbl` | Text label | Orange (SHORT) / Lime (LONG) | On order | Direction + SL/TP/R:R summary |
+
+**Inputs:**
+```mql5
+input group "=== Display ==="
+input bool   InpDrawObjects = true;
+input color  InpXMoveColor  = clrSteelBlue;   // X% impulse zone fill
+input color  InpMinorColor  = clrOrange;       // Minor low / minor high line
+input color  InpPBColor     = clrGold;         // Pullback peak / pullback trough line
+```
+
+**Core drawing functions:**
+```mql5
+void DeleteObjects(string prefix)
+{
+    for(int i = ObjectsTotal(0) - 1; i >= 0; i--)
+    {
+        string name = ObjectName(0, i);
+        if(StringFind(name, prefix) == 0) ObjectDelete(0, name);
+    }
+}
+
+// Filled rectangle — used for the X% impulse zone (40% opacity via OBJPROP_TRANSPARENCY)
+void DrawZone(string name, datetime t1, double price1,
+              datetime t2, double price2, color clr, int opacity = 40)
+{
+    if(!InpDrawObjects) return;
+    if(ObjectFind(0, name) >= 0) ObjectDelete(0, name);
+    ObjectCreate(0, name, OBJ_RECTANGLE, 0, t1, price1, t2, price2);
+    ObjectSetInteger(0, name, OBJPROP_COLOR,        clr);
+    ObjectSetInteger(0, name, OBJPROP_FILL,         true);
+    ObjectSetInteger(0, name, OBJPROP_BACK,         true);
+    ObjectSetInteger(0, name, OBJPROP_TRANSPARENCY, opacity);  // 0=opaque 100=invisible
+    ObjectSetInteger(0, name, OBJPROP_SELECTABLE,   false);
+}
+
+void DrawHLine(string name, double price, color clr, int width = 1,
+               ENUM_LINE_STYLE style = STYLE_DOT)
+{
+    if(!InpDrawObjects) return;
+    if(ObjectFind(0, name) >= 0) ObjectDelete(0, name);
+    ObjectCreate(0, name, OBJ_HLINE, 0, 0, price);
+    ObjectSetInteger(0, name, OBJPROP_COLOR,      clr);
+    ObjectSetInteger(0, name, OBJPROP_WIDTH,      width);
+    ObjectSetInteger(0, name, OBJPROP_STYLE,      style);
+    ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
+}
+
+void DrawLabel(string name, datetime t, double price, string text, color clr)
+{
+    if(!InpDrawObjects) return;
+    if(ObjectFind(0, name) >= 0) ObjectDelete(0, name);
+    ObjectCreate(0, name, OBJ_TEXT, 0, t, price);
+    ObjectSetString(0,  name, OBJPROP_TEXT,       text);
+    ObjectSetInteger(0, name, OBJPROP_COLOR,      clr);
+    ObjectSetInteger(0, name, OBJPROP_FONTSIZE,   8);
+    ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
+}
+```
+
+**RZY-specific draw call — invoke after structure is confirmed:**
+```mql5
+// priorLowBar = bar index of the prior low (oldest bar of X move)
+// peakBar     = bar index of the peak (AsSeries: higher index = older)
+void DrawRZYSetup(
+    int priorLowBar, double priorLow,
+    int peakBar,     double peakPx,
+    double minorPx,  double pbPx,
+    double entry,    double sl, double tp,
+    double rr,       string direction)
+{
+    if(!InpDrawObjects) return;
+    DeleteObjects("RZY_");
+
+    // X% impulse zone — filled rectangle from prior-low bar to peak bar, 40% opacity
+    datetime tPriorLow = iTime(_Symbol, PERIOD_CURRENT, priorLowBar);
+    datetime tPeak     = iTime(_Symbol, PERIOD_CURRENT, peakBar);
+    DrawZone("RZY_XZone", tPriorLow, priorLow, tPeak, peakPx, InpXMoveColor, 40);
+
+    // Structure levels
+    DrawHLine("RZY_Minor",  minorPx, InpMinorColor, 1, STYLE_DOT);
+    DrawHLine("RZY_PBPeak", pbPx,    InpPBColor,    1, STYLE_DOT);
+
+    // Order levels
+    DrawHLine("RZY_Entry", entry, clrDodgerBlue, 2, STYLE_SOLID);
+    DrawHLine("RZY_SL",    sl,    clrRed,        1, STYLE_DASH);
+    DrawHLine("RZY_TP",    tp,    clrLime,       1, STYLE_DASH);
+
+    // Label
+    color lblClr = (direction == "SHORT") ? clrOrange : clrLimeGreen;
+    DrawLabel("RZY_Lbl", iTime(_Symbol, PERIOD_CURRENT, 0), entry,
+              StringFormat("%s  SL:%.2f  TP:%.2f  RR:1:%.1f", direction, sl, tp, rr),
+              lblClr);
+}
+```
+
+**Usage in RunStrategy — SHORT example:**
+```mql5
+// After structure confirmed and order placed:
+DrawRZYSetup(priorLowBar, priorLow,
+             peakBar, peakPx,
+             minorPx, effectivePbPx,
+             curPrice, slPx, tpPx,
+             rr, "SHORT");
+
+// In OnDeinit:
+DeleteObjects("RZY_");
+```
+
+> **Note on `OBJPROP_TRANSPARENCY`:** Available in MT5 build 2361+. If the compiler rejects it, remove that line — `OBJPROP_BACK=true` still renders the zone behind candles with reduced visual weight. See `MQL5_COMPILE_GOTCHAS`.
+
+---
+
+### Generic prefix template (other strategies)
+
+Replace `RZY_` with your strategy abbreviation. Use `DrawZone` for any highlighted region, `DrawHLine` for levels, `DrawLabel` for annotations. Call `DeleteObjects("PREFIX_")` in `OnDeinit`.
+
+---
+
+## SKILL: MQL5_COMPILE_GOTCHAS
+
+Common MQL5 errors and their fixes. The `/deploy-ea` skill applies these automatically before copying to MetaTrader.
+
+| Error message | Root cause | Fix |
+|---|---|---|
+| `lvalue expected` / `implicit conversion from 'unknown' to 'string'` | `StringTrimLeft`/`StringTrimRight` return `int`, not a string — can't chain or assign | Call each in-place separately, then assign the variable |
+| `undeclared identifier 'OBJPROP_TRANSPARENCY'` | Property not available in this MT5 build | Remove the line — `OBJPROP_BACK=true` provides visual depth without it |
+| `wrong parameters count` on `ObjectSetInteger` | Follow-on error from the bad transparency line | Disappears once the transparency line is removed |
+| `ObjectsTotal()` wrong parameter count | MT4 signature used — MT5 requires a chart ID | Change to `ObjectsTotal(0)` |
+| `cannot convert enum` on `ObjectSetInteger` | Passing a raw bool literal | Cast to `(long)`: `(long)true` |
+
+**StringTrim fix:**
+```mql5
+// WRONG — lvalue error
+string p = StringTrimLeft(StringTrimRight(parts[i]));
+
+// CORRECT
+StringTrimLeft(parts[i]);
+StringTrimRight(parts[i]);
+string p = parts[i];
+```
+
+**Transparency fix:**
+```mql5
+// WRONG — undeclared identifier on some MT5 builds
+ObjectSetInteger(0, name, OBJPROP_TRANSPARENCY, 80);
+
+// CORRECT — remove it; background rendering via OBJPROP_BACK is sufficient
+ObjectSetInteger(0, name, OBJPROP_BACK, true);
+```
+
+---
+
 ## SKILL: DIAGNOSTIC_SCAN
 
 One-shot filter diagnostic — run when bot reports "No setup detected" to identify the blocker:

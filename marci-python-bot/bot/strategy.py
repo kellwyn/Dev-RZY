@@ -9,8 +9,8 @@ Setup sequence (both directions):
   Rule 3  — Midpoint TP: 70%*(mid→minor dist) beyond minor point
              SL: tighter of midpoint±2pip or pullbackPeak±2pip
   Rule 4  — Pullback depth + minimum impulse size gates
-  Rule 5  — 2-bar momentum confirmation from pullback peak
-  Rule 6  — Entry in zone between minor point and pullback peak
+  Rule 5  — Entry confirmation: zone candle gate + immediate entry at minor low
+  Rule 6  — Entry zone: price between minor point and pullback peak
   Rule 7  — Big Move Cooldown + Key Level filters (optional)
   Rule 8  — ICT session gate: Asian / London / NY AM + 1hr pre-mkt
   Rule 9  — Post-TP cooldown: 20-min block after TP + big follow-through
@@ -82,6 +82,9 @@ class StrategyConfig:
     # Key Level filter (Rule 7)
     use_key_level:    bool  = True
     key_level_pips:   float = 10.0
+
+    # Entry zone candle limit (Rule 5)
+    max_zone_candles: int = 3              # max candles allowed to close inside minor↔pb zone
 
     # Trade settings
     magic:    int = 20260412
@@ -405,20 +408,99 @@ def _find_long_setup(
                 x_move_pct=x_move_pct)
 
 
-# ── Rule 5: Momentum confirmation ─────────────────────────────────────────────
+# ── Rule 5: Entry confirmation ────────────────────────────────────────────────
+#
+# Replaces the old 2-bar momentum check. Reviews every completed bar after the
+# pullback peak and applies three gates before checking the live price:
+#
+#   1. Close > pb_px  → new higher pullback peak.
+#        Recalculate depth against max_pullback_pct. If within limits, promote
+#        pb_px to the new bar's high. If beyond, invalidate.
+#   2. Close < minor_px → price closed below the exhaustion low. Invalidate.
+#   3. Otherwise          → zone candle (consolidating between minor and pb).
+#        Count against max_zone_candles; too many means the setup is stale.
+#
+# Live price check:
+#   - bid ≤ minor_px  → immediate entry (forming bar has reached the minor low;
+#                        do not wait for it to close).
+#   - minor_px < bid < pb_px → standard entry zone.
 
-def _confirm_short_momentum(closes: np.ndarray, pb_idx: int) -> bool:
-    """Two declining closes after the pullback peak."""
-    if len(closes) - pb_idx - 1 < 2:
-        return False
-    return closes[-1] < closes[-2] and closes[-2] <= closes[pb_idx]
+def _confirm_short_entry(
+    s: dict,
+    highs: np.ndarray,
+    lows: np.ndarray,
+    closes: np.ndarray,
+    bid: float,
+    cfg: StrategyConfig,
+) -> Tuple[bool, float]:
+    """Returns (enter_now, effective_pb_px)."""
+    pb_px    = s["pb_px"]
+    minor_px = s["minor_px"]
+    peak_px  = s["peak_px"]
+    pb_idx   = s["pb_idx"]
+    n        = len(closes)
+    zone_count = 0
+
+    for i in range(pb_idx + 1, n):
+        c = closes[i]
+        h = highs[i]
+        if c > pb_px:
+            new_depth = (h - minor_px) / (peak_px - minor_px) * 100.0 \
+                        if (peak_px - minor_px) > 0 else 0.0
+            if new_depth > cfg.max_pullback_pct:
+                return False, pb_px  # pullback too deep — structure invalid
+            pb_px = h                # promote to new pullback high
+        elif c < minor_px:
+            return False, pb_px      # closed below exhaustion low — structure broken
+        else:
+            zone_count += 1
+            if zone_count > cfg.max_zone_candles:
+                return False, pb_px  # too many bars consolidating — setup stale
+
+    if bid <= minor_px:
+        return True, pb_px           # immediate entry: bar declined to minor low
+    if minor_px < bid < pb_px:
+        return True, pb_px           # standard entry zone
+    return False, pb_px
 
 
-def _confirm_long_momentum(closes: np.ndarray, pb_idx: int) -> bool:
-    """Two rising closes after the pullback trough."""
-    if len(closes) - pb_idx - 1 < 2:
-        return False
-    return closes[-1] > closes[-2] and closes[-2] >= closes[pb_idx]
+def _confirm_long_entry(
+    s: dict,
+    highs: np.ndarray,
+    lows: np.ndarray,
+    closes: np.ndarray,
+    ask: float,
+    cfg: StrategyConfig,
+) -> Tuple[bool, float]:
+    """Returns (enter_now, effective_pb_px). Mirror of _confirm_short_entry."""
+    pb_px     = s["pb_px"]
+    minor_px  = s["minor_px"]
+    trough_px = s["trough_px"]
+    pb_idx    = s["pb_idx"]
+    n         = len(closes)
+    zone_count = 0
+
+    for i in range(pb_idx + 1, n):
+        c = closes[i]
+        l = lows[i]
+        if c < pb_px:
+            new_depth = (minor_px - l) / (minor_px - trough_px) * 100.0 \
+                        if (minor_px - trough_px) > 0 else 0.0
+            if new_depth > cfg.max_pullback_pct:
+                return False, pb_px
+            pb_px = l                # promote to new pullback low
+        elif c > minor_px:
+            return False, pb_px      # closed above minor high — structure broken
+        else:
+            zone_count += 1
+            if zone_count > cfg.max_zone_candles:
+                return False, pb_px
+
+    if ask >= minor_px:
+        return True, pb_px           # immediate entry: bar reached minor high
+    if pb_px < ask < minor_px:
+        return True, pb_px
+    return False, pb_px
 
 
 # ── Data fetching ─────────────────────────────────────────────────────────────
@@ -499,11 +581,10 @@ def find_setup(cfg: StrategyConfig) -> Optional[TradeSetup]:
 
     # ── Try SHORT ─────────────────────────────────────────────────────────────
     s = _find_short_setup(highs, lows, cfg, pip)
-    if s and _confirm_short_momentum(closes, s["pb_idx"]):
-        cur = float(tick.bid)
-
-        # Rule 6: price in entry zone
-        if s["minor_px"] < cur < s["pb_px"]:
+    if s:
+        enter, pb_px = _confirm_short_entry(s, highs, lows, closes, float(tick.bid), cfg)
+        if enter:
+            cur = float(tick.bid)
 
             # Rule 7 filters
             if is_big_move_cooldown("SHORT", opens, closes, cfg):
@@ -515,8 +596,8 @@ def find_setup(cfg: StrategyConfig) -> Optional[TradeSetup]:
                 midpoint     = (s["peak_px"] + s["minor_px"]) / 2.0
                 dist         = midpoint - s["minor_px"]           # > 0
                 tp_px        = s["minor_px"] - dist * (cfg.tp_multiplier / 100.0)
-                sl_opt1      = midpoint      + pip * 2.0
-                sl_opt2      = s["pb_px"]    + pip * 2.0
+                sl_opt1      = midpoint + pip * 2.0
+                sl_opt2      = pb_px    + pip * 2.0               # effective pb_px
                 sl_px        = min(sl_opt1, sl_opt2)
 
                 risk   = sl_px - cur
@@ -530,22 +611,22 @@ def find_setup(cfg: StrategyConfig) -> Optional[TradeSetup]:
                         entry=cur, stop_loss=sl_px, target=tp_px,
                         risk_reward=rr,
                         peak_px=s["peak_px"], minor_px=s["minor_px"],
-                        pb_peak_px=s["pb_px"], midpoint=midpoint,
+                        pb_peak_px=pb_px, midpoint=midpoint,
                         x_move_pct=s["x_move_pct"],
                         session=session,
                         setup_notes=_build_notes(
                             "SHORT", cur, sl_px, tp_px, rr,
                             s["peak_px"], s["minor_px"],
-                            s["pb_px"], midpoint,
+                            pb_px, midpoint,
                             s["x_move_pct"], session),
                     )
 
     # ── Try LONG ──────────────────────────────────────────────────────────────
     lg = _find_long_setup(highs, lows, cfg, pip)
-    if lg and _confirm_long_momentum(closes, lg["pb_idx"]):
-        cur = float(tick.ask)
-
-        if lg["pb_px"] < cur < lg["minor_px"]:
+    if lg:
+        enter, pb_px = _confirm_long_entry(lg, highs, lows, closes, float(tick.ask), cfg)
+        if enter:
+            cur = float(tick.ask)
 
             if is_big_move_cooldown("LONG", opens, closes, cfg):
                 lg = None
@@ -556,8 +637,8 @@ def find_setup(cfg: StrategyConfig) -> Optional[TradeSetup]:
                 midpoint = (lg["trough_px"] + lg["minor_px"]) / 2.0
                 dist     = lg["minor_px"] - midpoint              # > 0
                 tp_px    = lg["minor_px"] + dist * (cfg.tp_multiplier / 100.0)
-                sl_opt1  = midpoint      - pip * 2.0
-                sl_opt2  = lg["pb_px"]   - pip * 2.0
+                sl_opt1  = midpoint - pip * 2.0
+                sl_opt2  = pb_px    - pip * 2.0                   # effective pb_px
                 sl_px    = max(sl_opt1, sl_opt2)
 
                 risk   = cur   - sl_px
@@ -571,13 +652,13 @@ def find_setup(cfg: StrategyConfig) -> Optional[TradeSetup]:
                         entry=cur, stop_loss=sl_px, target=tp_px,
                         risk_reward=rr,
                         peak_px=lg["trough_px"], minor_px=lg["minor_px"],
-                        pb_peak_px=lg["pb_px"], midpoint=midpoint,
+                        pb_peak_px=pb_px, midpoint=midpoint,
                         x_move_pct=lg["x_move_pct"],
                         session=session,
                         setup_notes=_build_notes(
                             "LONG", cur, sl_px, tp_px, rr,
                             lg["trough_px"], lg["minor_px"],
-                            lg["pb_px"], midpoint,
+                            pb_px, midpoint,
                             lg["x_move_pct"], session),
                     )
 

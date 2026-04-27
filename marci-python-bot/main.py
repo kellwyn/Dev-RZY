@@ -134,6 +134,9 @@ cfg = StrategyConfig(
     use_key_level  = _bool("USE_KEY_LEVEL",  True),
     key_level_pips = _float("KEY_LEVEL_PIPS", 10.0),
 
+    # Entry zone candle limit
+    max_zone_candles = _int("MAX_ZONE_CANDLES", 3),
+
     # Trade Settings
     magic    = _int("MAGIC_NUMBER", 20260412),
     slippage = _int("SLIPPAGE",     20),
