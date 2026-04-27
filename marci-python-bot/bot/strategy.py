@@ -51,7 +51,7 @@ class StrategyConfig:
 
     # Strategy
     candle_count:    int   = 20
-    big_x_move_pct:  float = 0.5           # X% impulse
+    big_x_move_pct:  float = 0.3           # X% impulse
     y_max_pct:       float = 600.0         # capped to 90 at runtime
     tp_multiplier:   float = 0.5           # % of mid→minor distance
 

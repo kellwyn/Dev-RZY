@@ -66,7 +66,7 @@ input double InpMaxLots           = 7.0;    // Hard cap on position size — nev
 
 input group "=== Strategy Parameters ==="
 input int    InpCandleCount       = 20;     // Historical bars to analyse
-input double InpBigXMovePct       = 0.5;    // X% — impulse move size that defines the peak
+input double InpBigXMovePct       = 0.3;    // X% — impulse move size that defines the peak
                                             //   Forex: 1-2%  |  Indices: 2-4%  |  Crypto: 5%+
 input double InpYMaxPct           = 600.0;  // Y% — max distance (minor pt → peak) as % of X move
                                             //   Hard cap at runtime: 90%. Set high to effectively disable.

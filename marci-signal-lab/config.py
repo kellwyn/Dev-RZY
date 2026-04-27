@@ -38,7 +38,7 @@ class LabConfig:
 
     # ── Strategy parameters — v102_settings_xauone.set ───────────────────────
     candle_count:     int   = 20
-    big_x_move_pct:   float = 0.5
+    big_x_move_pct:   float = 0.3
     y_max_pct:        float = 600.0   # capped to 90 at runtime
     tp_multiplier:    float = 0.5
     min_impulse_pips: float = 5.0
