@@ -65,8 +65,8 @@ def _find_short(
         # Rule 1: X% UP move (body-to-body)
         p_body         = float(max(opens[p_idx], closes[p_idx]))
         prior_body_low = float(min(
-            np.min(opens[:p_idx + 1]),
-            np.min(closes[:p_idx + 1])
+            np.min(opens[:p_idx]),
+            np.min(closes[:p_idx])
         ))
         if prior_body_low == 0:
             continue
@@ -174,8 +174,8 @@ def _find_long(
         # Rule 1: X% DOWN move (body-to-body)
         t_body          = float(min(opens[t_idx], closes[t_idx]))
         prior_body_high = float(max(
-            np.max(opens[:t_idx + 1]),
-            np.max(closes[:t_idx + 1])
+            np.max(opens[:t_idx]),
+            np.max(closes[:t_idx])
         ))
         if prior_body_high == 0:
             continue

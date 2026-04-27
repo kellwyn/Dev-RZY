@@ -291,8 +291,8 @@ def _find_short_setup(
         # Step 1 — X% UP move (body-to-body)
         peak_body      = float(max(opens[peak_idx], closes[peak_idx]))
         prior_body_low = float(min(
-            np.min(opens[:peak_idx + 1]),
-            np.min(closes[:peak_idx + 1])
+            np.min(opens[:peak_idx]),
+            np.min(closes[:peak_idx])
         ))
         if prior_body_low == 0:
             continue
@@ -376,8 +376,8 @@ def _find_long_setup(
         # Step 1 — X% DOWN move (body-to-body)
         trough_body     = float(min(opens[trough_idx], closes[trough_idx]))
         prior_body_high = float(max(
-            np.max(opens[:trough_idx + 1]),
-            np.max(closes[:trough_idx + 1])
+            np.max(opens[:trough_idx]),
+            np.max(closes[:trough_idx])
         ))
         if prior_body_high == 0:
             continue
