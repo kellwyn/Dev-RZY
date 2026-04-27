@@ -81,6 +81,9 @@ input double InpMaxPullbackPct    = 70.0;   // Max pullback retracement % (deepe
 input group "=== Entry Zone Candle Gate (Rule 5) ==="
 input int    InpMaxZoneCandles    = 3;      // Max candles allowed to close between minor low and pb high
 
+input group "=== Structure Timing Gates (Rules 1-4) ==="
+input int    InpMaxStructureBars  = 5;      // Minor must form within N bars of peak; pb within N bars of minor
+
 input group "=== ICT Session Filter (Rule 8) ==="
 input bool   InpUseSessionFilter  = false;  // Only trade during active ICT sessions
 input int    InpGMTOffset         = 0;      // Broker server offset from GMT (e.g. +2 = EET)
@@ -122,6 +125,10 @@ input color  InpPBColor     = clrGold;         // Pullback peak / trough dotted 
 CTrade   Trade;
 datetime g_lastTPExitTime  = 0;
 double   g_lastTPExitPrice = 0.0;
+double   g_execShortPeakPx = 0.0;   // peak of last executed SHORT — reset when structure expires
+double   g_execLongTrPx    = 0.0;   // trough of last executed LONG — reset when structure expires
+int      g_drawCount       = 0;     // increments each trade so object names stay unique
+int      g_activeDrawCount = 0;    // draw group of the currently open trade (0 = none)
 
 //+------------------------------------------------------------------+
 //| Initialisation                                                   |
@@ -165,24 +172,43 @@ void OnTick()
 }
 
 //+------------------------------------------------------------------+
-//| Rule 9 — detect TP exits via trade transaction stream           |
+//| Trade close handler — Rule 9 cooldown + drawing trim            |
 //+------------------------------------------------------------------+
 void OnTradeTransaction(const MqlTradeTransaction &trans,
                         const MqlTradeRequest     &request,
                         const MqlTradeResult      &result)
 {
-    if(!InpUsePostTPCooldown)           return;
     if(trans.type != TRADE_TRANSACTION_DEAL_ADD) return;
+    if(!HistoryDealSelect(trans.deal))           return;
 
-    if(HistoryDealSelect(trans.deal))
+    ulong  magic      = (ulong)HistoryDealGetInteger(trans.deal, DEAL_MAGIC);
+    if(magic != (ulong)InpMagicNumber)           return;
+
+    ENUM_DEAL_ENTRY entryType = (ENUM_DEAL_ENTRY) HistoryDealGetInteger(trans.deal, DEAL_ENTRY);
+    ENUM_DEAL_REASON why      = (ENUM_DEAL_REASON)HistoryDealGetInteger(trans.deal, DEAL_REASON);
+    datetime dealTime         = (datetime)         HistoryDealGetInteger(trans.deal, DEAL_TIME);
+    double   dealPrice        =                    HistoryDealGetDouble (trans.deal, DEAL_PRICE);
+
+    //── Rule 9: Post-TP cooldown ──────────────────────────────────
+    if(InpUsePostTPCooldown && why == DEAL_REASON_TP)
     {
-        ulong magic  = (ulong)HistoryDealGetInteger(trans.deal, DEAL_MAGIC);
-        ENUM_DEAL_REASON why = (ENUM_DEAL_REASON)HistoryDealGetInteger(trans.deal, DEAL_REASON);
-        if(magic == (ulong)InpMagicNumber && why == DEAL_REASON_TP)
+        g_lastTPExitTime  = dealTime;
+        g_lastTPExitPrice = dealPrice;
+    }
+
+    //── Drawing: trim lines to close bar on any exit ──────────────
+    // Catches TP, SL, and manual close — stops drawings at trade end.
+    if(InpDrawObjects && entryType == DEAL_ENTRY_OUT && g_activeDrawCount > 0)
+    {
+        string sfx   = IntegerToString(g_activeDrawCount);
+        string names[6] = {"RZY_Minor_","RZY_PBPeak_","RZY_Entry_","RZY_SL_","RZY_TP_","RZY_BaseLine_"};
+        for(int i = 0; i < 6; i++)
         {
-            g_lastTPExitTime  = (datetime)HistoryDealGetInteger(trans.deal, DEAL_TIME);
-            g_lastTPExitPrice = HistoryDealGetDouble(trans.deal, DEAL_PRICE);
+            string n = names[i] + sfx;
+            if(ObjectFind(0, n) >= 0)
+                ObjectSetInteger(0, n, OBJPROP_TIME, 1, dealTime);
         }
+        g_activeDrawCount = 0;
     }
 }
 
@@ -243,10 +269,17 @@ void RunStrategy()
         int    pbBar    = -1; double pbPx    = 0;
         double effectivePbPx = 0;
 
-        if(FindShortSetup(highs, lows, InpCandleCount, InpBigXMovePct,
-                          yMaxPct, InpMinPullbackPct, InpMaxPullbackPct,
-                          pipVal, InpMinImpulsePips,
-                          peakBar, peakPx, minorBar, minorPx, pbBar, pbPx)
+        bool shortFound = FindShortSetup(highs, lows, opens, closes,
+                                          InpCandleCount, InpBigXMovePct,
+                                          yMaxPct, InpMinPullbackPct, InpMaxPullbackPct,
+                                          pipVal, InpMinImpulsePips, InpMaxStructureBars,
+                                          peakBar, peakPx, minorBar, minorPx, pbBar, pbPx);
+
+        // Reset 1-trade guard when structure expires; skip same structure if already traded
+        if(!shortFound) g_execShortPeakPx = 0.0;
+        if(shortFound && MathAbs(peakPx - g_execShortPeakPx) < pipVal * 2) shortFound = false;
+
+        if(shortFound
            && ConfirmShortEntry(closes, highs, lows, pbBar, peakPx, minorPx,
                                 InpMaxPullbackPct, InpMaxZoneCandles, effectivePbPx))
         {
@@ -273,7 +306,17 @@ void RunStrategy()
                     double lots    = CalcLots(curPrice, slPx);
                     string summary = BuildSummary("SHORT", curPrice, slPx, tpPx, rr,
                                                   peakPx, minorPx, effectivePbPx, midpoint, lots);
+                    // Find prior body low (base of X% move) — oldest bar beyond peak
+                    double priorBodLow_s = DBL_MAX; int priorBodBar_s = peakBar + 1;
+                    for(int j = peakBar + 1; j < InpCandleCount; j++)
+                    {
+                        double bLow = MathMin(opens[j], closes[j]);
+                        if(bLow < priorBodLow_s) { priorBodLow_s = bLow; priorBodBar_s = j; }
+                    }
+                    if(priorBodLow_s == DBL_MAX) { priorBodLow_s = minorPx; priorBodBar_s = peakBar + 1; }
                     DrawRZYSetup(peakBar, minorPx, peakPx,
+                                 priorBodBar_s, priorBodLow_s,
+                                 minorBar, pbBar,
                                  minorPx, effectivePbPx,
                                  curPrice, slPx, tpPx, rr, "SHORT");
                     Comment(summary);
@@ -284,6 +327,7 @@ void RunStrategy()
                         if(!Trade.Sell(lots, _Symbol, curPrice, slPx, tpPx, "Marci_MM_SHORT"))
                             Print("Order failed: ", Trade.ResultRetcodeDescription());
 
+                    g_execShortPeakPx = peakPx;  // mark structure as traded; reset on structure expiry
                     shortFired = true;
                 }
             }
@@ -303,10 +347,16 @@ void RunStrategy()
         int    pbBar     = -1; double pbPx     = 0;
         double effectivePbPx = 0;
 
-        if(FindLongSetup(highs, lows, InpCandleCount, InpBigXMovePct,
-                         yMaxPct, InpMinPullbackPct, InpMaxPullbackPct,
-                         pipVal, InpMinImpulsePips,
-                         troughBar, troughPx, minorBar, minorPx, pbBar, pbPx)
+        bool longFound = FindLongSetup(highs, lows, opens, closes,
+                                        InpCandleCount, InpBigXMovePct,
+                                        yMaxPct, InpMinPullbackPct, InpMaxPullbackPct,
+                                        pipVal, InpMinImpulsePips, InpMaxStructureBars,
+                                        troughBar, troughPx, minorBar, minorPx, pbBar, pbPx);
+
+        if(!longFound) g_execLongTrPx = 0.0;
+        if(longFound && MathAbs(troughPx - g_execLongTrPx) < pipVal * 2) longFound = false;
+
+        if(longFound
            && ConfirmLongEntry(closes, highs, lows, pbBar, troughPx, minorPx,
                                InpMaxPullbackPct, InpMaxZoneCandles, effectivePbPx))
         {
@@ -334,7 +384,17 @@ void RunStrategy()
             string summary = BuildSummary("LONG", curPrice, slPx, tpPx, rr,
                                           troughPx, minorPx, effectivePbPx, midpoint, lots);
 
+            // Find prior body high (base of X% move) — oldest bar beyond trough
+            double priorBodHigh_l = 0.0; int priorBodBar_l = troughBar + 1;
+            for(int j = troughBar + 1; j < InpCandleCount; j++)
+            {
+                double bHigh = MathMax(opens[j], closes[j]);
+                if(bHigh > priorBodHigh_l) { priorBodHigh_l = bHigh; priorBodBar_l = j; }
+            }
+            if(priorBodHigh_l == 0.0) { priorBodHigh_l = minorPx; priorBodBar_l = troughBar + 1; }
             DrawRZYSetup(troughBar, troughPx, minorPx,
+                         priorBodBar_l, priorBodHigh_l,
+                         minorBar, pbBar,
                          minorPx, effectivePbPx,
                          curPrice, slPx, tpPx, rr, "LONG");
             Comment(summary);
@@ -347,6 +407,7 @@ void RunStrategy()
                     if(!Trade.Buy(lots, _Symbol, curPrice, slPx, tpPx, "Marci_MM_LONG"))
                         Print("Order failed: ", Trade.ResultRetcodeDescription());
             }
+            g_execLongTrPx = troughPx;  // mark structure as traded; reset on structure expiry
         }
     }
 }
@@ -376,71 +437,79 @@ void RunStrategy()
 //+------------------------------------------------------------------+
 bool FindShortSetup(
     const double &highs[], const double &lows[],
+    const double &opens[], const double &closes[],
     int bars, double xPct, double yMaxPct,
     double minPbPct, double maxPbPct,
-    double pipVal,   double minImpPips,
+    double pipVal, double minImpPips, int maxStructBars,
     int &peakBar, double &peakPx,
     int &minorBar, double &minorPx,
     int &pbBar, double &pbPx)
 {
-    //── Step 1: Highest high in lookback (PEAK) ─────────────────────
-    peakBar = ArrayMaximum(highs, 0, bars);
-    if(peakBar < 4) return false;   // need enough bars after peak
-    peakPx  = highs[peakBar];
+    // Iterate candidate peaks from most recent (small AsSeries index) to oldest.
+    // For each peak meeting the X% gate, minor low must form within maxStructBars
+    // bars and pullback peak within maxStructBars bars of the minor. If either
+    // timing constraint fails, discard that peak and re-evaluate from step 1.
+    //
+    // AsSeries convention: index 0 = most recent, higher index = older.
+    // "After peak" (chronologically) = smaller index than peak.
 
-    //── Step 2: Validate X% UP move ─────────────────────────────────
-    // Prior low = lowest low in bars OLDER than the peak
-    double priorLow = DBL_MAX;
-    for(int i = peakBar; i < bars; i++)
-        if(lows[i] < priorLow) priorLow = lows[i];
-    if(priorLow == DBL_MAX || priorLow == 0) return false;
+    int minPeakIdx = maxStructBars * 2 + 2;  // need room for minor + pb + 2 confirmation bars
 
-    double xMovePrice = peakPx - priorLow;
-    if(xMovePrice <= 0) return false;
-    if(xMovePrice / priorLow * 100.0 < xPct) return false;
+    for(int pk = minPeakIdx; pk < bars; pk++)
+    {
+        double pkPx = highs[pk];
 
-    //── Step 3: PULLBACK PEAK — highest high in bars after peak ─────
-    // Search all bars more recent than peak (indices 0..peakBar-1)
-    pbBar = ArrayMaximum(highs, 0, peakBar);
-    if(pbBar < 0) return false;
-    pbPx  = highs[pbBar];
+        //── Step 1: X% UP move (body-to-body) ──────────────────────
+        double pkBody      = MathMax(opens[pk], closes[pk]);  // top of peak candle body
+        double priorBodLow = DBL_MAX;
+        for(int i = pk + 1; i < bars; i++)
+        {
+            double bLow = MathMin(opens[i], closes[i]);
+            if(bLow < priorBodLow) priorBodLow = bLow;
+        }
+        if(priorBodLow == DBL_MAX || priorBodLow == 0) continue;
+        double xMove = pkBody - priorBodLow;
+        if(xMove <= 0) continue;
+        if(xMove / priorBodLow * 100.0 < xPct) continue;
 
-    // Must be a LOWER high than the original peak
-    if(pbPx >= peakPx) return false;
-    // Need at least 2 bars between pb peak and current bar for confirmation
-    if(pbBar < 2) return false;
+        //── Step 2: MINOR LOW within maxStructBars bars after peak ──
+        // In AsSeries, "after peak" = indices pk-1 down to pk-maxStructBars
+        int mnStart = MathMax(0, pk - maxStructBars);
+        int mnCount = pk - mnStart;          // number of bars to search
+        if(mnCount < 1) continue;
+        int mnBar = ArrayMinimum(lows, mnStart, mnCount);
+        double mnPx = lows[mnBar];
 
-    //── Step 4: MINOR LOW — lowest low strictly BETWEEN peak & pb ───
-    // In AsSeries: the window is indices (pbBar+1) to (peakBar-1)
-    // That window = bars that are more recent than peak but older than pb peak
-    int windowSize = peakBar - pbBar - 1;
-    if(windowSize < 1) return false;  // peak and pb peak are adjacent — no room
+        //── Step 3: PULLBACK PEAK within maxStructBars bars after minor
+        int pbStart = MathMax(2, mnBar - maxStructBars);  // index >= 2 for confirmation
+        int pbCount = mnBar - pbStart;
+        if(pbCount < 1) continue;
+        int pbBar_c = ArrayMaximum(highs, pbStart, pbCount);
+        double pbPx_c = highs[pbBar_c];
 
-    minorBar = ArrayMinimum(lows, pbBar + 1, windowSize);
-    if(minorBar < 0) return false;
-    minorPx  = lows[minorBar];
+        //── Structural validity ──────────────────────────────────────
+        if(pbPx_c >= pkPx)  continue;  // not a lower high
+        if(mnPx   >= pbPx_c) continue; // minor must be below pb
+        if(pbBar_c < 2)      continue; // need 2 confirmation bars
 
-    // Minor low must be genuinely below the pullback peak
-    if(minorPx >= pbPx) return false;
+        //── Step 4: Y% gate ─────────────────────────────────────────
+        double mnDist = pkPx - mnPx;
+        if(mnDist <= 0 || mnDist > (yMaxPct / 100.0) * xMove) continue;
 
-    //── Step 5: Y% gate — minor low must be "minor" ─────────────────
-    // The drop from peak to minor low must not exceed Y% of the X move.
-    // If it does, the move has reversed enough to be a new trend — not minor.
-    double minorDist = peakPx - minorPx;
-    if(minorDist > (yMaxPct / 100.0) * xMovePrice) return false;
-    if(minorDist <= 0) return false;
+        //── Step 5: Pullback depth ───────────────────────────────────
+        double pbDepth = (pbPx_c - mnPx) / (pkPx - mnPx) * 100.0;
+        if(pbDepth < minPbPct || pbDepth > maxPbPct) continue;
 
-    //── Step 6: Pullback depth gate ─────────────────────────────────
-    // How far did price retrace from minor low back up to pullback peak?
-    // (pbPx - minorPx) / (peakPx - minorPx) × 100 = retracement %
-    double pbDepthPct = (pbPx - minorPx) / (peakPx - minorPx) * 100.0;
-    if(pbDepthPct < minPbPct || pbDepthPct > maxPbPct) return false;
+        //── Step 6: Minimum impulse ──────────────────────────────────
+        if(pipVal > 0 && mnDist / pipVal < minImpPips) continue;
 
-    //── Step 7: Minimum impulse size (peak → minor low, in pips) ────
-    double impulsePips = (pipVal > 0) ? minorDist / pipVal : 0;
-    if(impulsePips < minImpPips) return false;
-
-    return true;
+        // Valid — assign outputs
+        peakBar  = pk;     peakPx  = pkPx;
+        minorBar = mnBar;  minorPx = mnPx;
+        pbBar    = pbBar_c; pbPx   = pbPx_c;
+        return true;
+    }
+    return false;
 }
 
 //+------------------------------------------------------------------+
@@ -465,62 +534,74 @@ bool FindShortSetup(
 //+------------------------------------------------------------------+
 bool FindLongSetup(
     const double &highs[], const double &lows[],
+    const double &opens[], const double &closes[],
     int bars, double xPct, double yMaxPct,
     double minPbPct, double maxPbPct,
-    double pipVal,   double minImpPips,
+    double pipVal, double minImpPips, int maxStructBars,
     int &troughBar, double &troughPx,
     int &minorBar,  double &minorPx,
     int &pbBar,     double &pbPx)
 {
-    //── Step 1: Lowest low in lookback (TROUGH) ─────────────────────
-    troughBar = ArrayMinimum(lows, 0, bars);
-    if(troughBar < 4) return false;
-    troughPx  = lows[troughBar];
+    // Mirror of FindShortSetup. Iterates candidate troughs from most recent
+    // to oldest. Minor high must form within maxStructBars bars of trough;
+    // pullback trough within maxStructBars bars of minor high.
 
-    //── Step 2: Validate X% DOWN move ───────────────────────────────
-    double priorHigh = 0;
-    for(int i = troughBar; i < bars; i++)
-        if(highs[i] > priorHigh) priorHigh = highs[i];
-    if(priorHigh == 0 || troughPx == 0) return false;
+    int minTroughIdx = maxStructBars * 2 + 2;
 
-    double xMovePrice = priorHigh - troughPx;
-    if(xMovePrice <= 0) return false;
-    if(xMovePrice / priorHigh * 100.0 < xPct) return false;
+    for(int tr = minTroughIdx; tr < bars; tr++)
+    {
+        double trPx = lows[tr];
 
-    //── Step 3: PULLBACK TROUGH — lowest low in bars after trough ───
-    pbBar = ArrayMinimum(lows, 0, troughBar);
-    if(pbBar < 0) return false;
-    pbPx  = lows[pbBar];
+        //── Step 1: X% DOWN move (body-to-body) ─────────────────────
+        double trBody       = MathMin(opens[tr], closes[tr]);  // bottom of trough candle body
+        double priorBodHigh = 0;
+        for(int i = tr + 1; i < bars; i++)
+        {
+            double bHigh = MathMax(opens[i], closes[i]);
+            if(bHigh > priorBodHigh) priorBodHigh = bHigh;
+        }
+        if(priorBodHigh == 0 || trBody == 0) continue;
+        double xMove = priorBodHigh - trBody;
+        if(xMove <= 0) continue;
+        if(xMove / priorBodHigh * 100.0 < xPct) continue;
 
-    // Must be a HIGHER low than the original trough
-    if(pbPx <= troughPx) return false;
-    if(pbBar < 2) return false;
+        //── Step 2: MINOR HIGH within maxStructBars bars after trough
+        int mnStart = MathMax(0, tr - maxStructBars);
+        int mnCount = tr - mnStart;
+        if(mnCount < 1) continue;
+        int mnBar = ArrayMaximum(highs, mnStart, mnCount);
+        double mnPx = highs[mnBar];
 
-    //── Step 4: MINOR HIGH — highest high strictly BETWEEN trough & pb
-    int windowSize = troughBar - pbBar - 1;
-    if(windowSize < 1) return false;
+        //── Step 3: PULLBACK TROUGH within maxStructBars bars after minor
+        int pbStart = MathMax(2, mnBar - maxStructBars);
+        int pbCount = mnBar - pbStart;
+        if(pbCount < 1) continue;
+        int pbBar_c = ArrayMinimum(lows, pbStart, pbCount);
+        double pbPx_c = lows[pbBar_c];
 
-    minorBar = ArrayMaximum(highs, pbBar + 1, windowSize);
-    if(minorBar < 0) return false;
-    minorPx  = highs[minorBar];
+        //── Structural validity ──────────────────────────────────────
+        if(pbPx_c <= trPx)   continue;  // must be higher low
+        if(mnPx   <= pbPx_c) continue;  // minor must be above pb
+        if(pbBar_c < 2)      continue;
 
-    // Minor high must be genuinely above the pullback trough
-    if(minorPx <= pbPx) return false;
+        //── Step 4: Y% gate ─────────────────────────────────────────
+        double mnDist = mnPx - trPx;
+        if(mnDist <= 0 || mnDist > (yMaxPct / 100.0) * xMove) continue;
 
-    //── Step 5: Y% gate — minor high must be "minor" ────────────────
-    double minorDist = minorPx - troughPx;
-    if(minorDist > (yMaxPct / 100.0) * xMovePrice) return false;
-    if(minorDist <= 0) return false;
+        //── Step 5: Pullback depth ───────────────────────────────────
+        double pbDepth = (mnPx - pbPx_c) / (mnPx - trPx) * 100.0;
+        if(pbDepth < minPbPct || pbDepth > maxPbPct) continue;
 
-    //── Step 6: Pullback depth gate ─────────────────────────────────
-    double pbDepthPct = (minorPx - pbPx) / (minorPx - troughPx) * 100.0;
-    if(pbDepthPct < minPbPct || pbDepthPct > maxPbPct) return false;
+        //── Step 6: Minimum impulse ──────────────────────────────────
+        if(pipVal > 0 && mnDist / pipVal < minImpPips) continue;
 
-    //── Step 7: Minimum impulse size (trough → minor high, in pips) ─
-    double impulsePips = (pipVal > 0) ? minorDist / pipVal : 0;
-    if(impulsePips < minImpPips) return false;
-
-    return true;
+        // Valid — assign outputs
+        troughBar = tr;      troughPx = trPx;
+        minorBar  = mnBar;   minorPx  = mnPx;
+        pbBar     = pbBar_c; pbPx     = pbPx_c;
+        return true;
+    }
+    return false;
 }
 
 //+------------------------------------------------------------------+
@@ -867,18 +948,34 @@ void DrawZone(string name, datetime t1, double price1,
     ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
 }
 
-// Full-chart horizontal line
-void DrawHLine(string name, double price, color clr, int width,
-               ENUM_LINE_STYLE style)
+// Bounded horizontal line from t1 to t2 (OBJ_TREND, no rays).
+// t2 is set far in the future at draw time; OnTradeTransaction trims it to
+// the actual close bar when the trade exits.
+void DrawHLine(string name, datetime t1, datetime t2, double price,
+               color clr, int width, ENUM_LINE_STYLE style)
 {
     if(!InpDrawObjects) return;
     if(ObjectFind(0, name) >= 0) ObjectDelete(0, name);
-    ObjectCreate(0, name, OBJ_HLINE, 0, 0, price);
+    ObjectCreate(0, name, OBJ_TREND, 0, t1, price, t2, price);
     ObjectSetInteger(0, name, OBJPROP_COLOR,      clr);
     ObjectSetInteger(0, name, OBJPROP_WIDTH,      width);
     ObjectSetInteger(0, name, OBJPROP_STYLE,      style);
+    ObjectSetInteger(0, name, OBJPROP_RAY_RIGHT,  false);
+    ObjectSetInteger(0, name, OBJPROP_RAY_LEFT,   false);
     ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
     ObjectSetString (0, name, OBJPROP_TOOLTIP,    name + ": " + DoubleToString(price, _Digits));
+}
+
+// Arrow marker at a single bar/price (OBJ_ARROW_UP or OBJ_ARROW_DOWN)
+void DrawArrow(string name, datetime t, double price, bool pointUp, color clr, int width)
+{
+    if(!InpDrawObjects) return;
+    if(ObjectFind(0, name) >= 0) ObjectDelete(0, name);
+    ENUM_OBJECT arrowType = pointUp ? OBJ_ARROW_UP : OBJ_ARROW_DOWN;
+    ObjectCreate(0, name, arrowType, 0, t, price);
+    ObjectSetInteger(0, name, OBJPROP_COLOR,      clr);
+    ObjectSetInteger(0, name, OBJPROP_WIDTH,      width);
+    ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
 }
 
 // Text label at a specific bar/price
@@ -894,38 +991,80 @@ void DrawLabel(string name, datetime t, double price, string text, color clr)
 }
 
 // Draw all RZY chart objects for a confirmed setup.
-//   xBar          — bar index of the peak (SHORT) or trough (LONG)
-//   xLow / xHigh  — price range of the peak bar highlight
-//                   SHORT: xLow=minorPx,  xHigh=peakPx
-//                   LONG:  xLow=troughPx, xHigh=minorPx
-//   minorPx       — exhaustion low/high (entry zone floor / TP reference)
+//   xBar          — peak (SHORT) or trough (LONG) bar index
+//   xLow/xHigh    — XZone rectangle price range
+//   priorBodBar   — bar of the prior body low (SHORT) / body high (LONG) — X% base
+//   priorBodPx    — price of that body extreme — dotted white reference line
+//   minorBarIdx   — bar of the minor low (SHORT) / minor high (LONG) — white up/down arrow
+//   pbBarIdx      — bar of the pullback peak (SHORT) / trough (LONG) — white down/up arrow
+//   minorPx       — exhaustion level (entry zone floor / TP reference)
 //   pbPx          — effective pullback level (entry zone ceiling / SL reference)
 void DrawRZYSetup(
-    int    xBar,    double xLow,  double xHigh,
-    double minorPx, double pbPx,
-    double entry,   double sl,    double tp,
-    double rr,      string direction)
+    int    xBar,         double xLow,       double xHigh,
+    int    priorBodBar,  double priorBodPx,
+    int    minorBarIdx,  int    pbBarIdx,
+    double minorPx,      double pbPx,
+    double entry,        double sl,         double tp,
+    double rr,           string direction)
 {
     if(!InpDrawObjects) return;
-    DeleteObjects("RZY_");
 
-    // X% peak zone — single peak-bar highlight at 40% opacity
+    g_drawCount++;
+    g_activeDrawCount = g_drawCount;
+    string sfx = IntegerToString(g_drawCount);
+
+    // t1 = entry bar time; t2 = far future (trimmed to close bar by OnTradeTransaction)
+    datetime t1 = iTime(_Symbol, PERIOD_CURRENT, 0);
+    datetime t2 = t1 + (datetime)(86400 * 3650);
+
+    // Arrow offset: 3 pips below lows / above highs so arrows don't overlap wicks
+    double pVal   = ((_Digits == 5 || _Digits == 3) ? _Point * 10.0 : _Point);
+    double offset = pVal * 3;
+    bool   isShort = (direction == "SHORT");
+
+    // ── X% peak/trough zone ─────────────────────────────────────────
     datetime tLeft  = iTime(_Symbol, PERIOD_CURRENT, xBar + 1);
     datetime tRight = iTime(_Symbol, PERIOD_CURRENT, xBar);
-    DrawZone("RZY_XZone", tLeft, xLow, tRight, xHigh, InpXMoveColor);
+    DrawZone("RZY_XZone_" + sfx, tLeft, xLow, tRight, xHigh, InpXMoveColor);
 
-    // Structure levels
-    DrawHLine("RZY_Minor",  minorPx, InpMinorColor, 1, STYLE_DOT);
-    DrawHLine("RZY_PBPeak", pbPx,    InpPBColor,    1, STYLE_DOT);
+    // ── X% base candle marker ────────────────────────────────────────
+    // White dotted reference line at the prior body low/high (base of X% move)
+    DrawHLine("RZY_BaseLine_" + sfx, t1, t2, priorBodPx, clrWhite, 1, STYLE_DOT);
 
-    // Order levels
-    DrawHLine("RZY_Entry", entry, clrDodgerBlue, 2, STYLE_SOLID);
-    DrawHLine("RZY_SL",    sl,    clrRed,        1, STYLE_DASH);
-    DrawHLine("RZY_TP",    tp,    clrLime,       1, STYLE_DASH);
+    // White arrow at the base candle:
+    //   SHORT: prior body LOW → up arrow below the bar
+    //   LONG:  prior body HIGH → down arrow above the bar
+    datetime tBase = iTime(_Symbol, PERIOD_CURRENT, priorBodBar);
+    double arrowBase = isShort ? iLow (_Symbol, PERIOD_CURRENT, priorBodBar) - offset
+                                : iHigh(_Symbol, PERIOD_CURRENT, priorBodBar) + offset;
+    DrawArrow("RZY_BaseMark_" + sfx, tBase, arrowBase, isShort, clrWhite, 2);
 
-    // Label at entry bar showing direction + SL / TP / R:R
-    color lblClr = (direction == "SHORT") ? clrOrange : clrLimeGreen;
-    DrawLabel("RZY_Lbl", iTime(_Symbol, PERIOD_CURRENT, 0), entry,
-              StringFormat(" %s  SL:%.2f  TP:%.2f  RR:1:%.1f", direction, sl, tp, rr),
+    // ── Minor low/high candle marker ─────────────────────────────────
+    // White arrow: SHORT → up arrow below bar;  LONG → down arrow above bar
+    datetime tMinor = iTime(_Symbol, PERIOD_CURRENT, minorBarIdx);
+    double arrowMinor = isShort ? iLow (_Symbol, PERIOD_CURRENT, minorBarIdx) - offset
+                                 : iHigh(_Symbol, PERIOD_CURRENT, minorBarIdx) + offset;
+    DrawArrow("RZY_MinorMark_" + sfx, tMinor, arrowMinor, isShort, clrWhite, 2);
+
+    // ── Pullback peak/trough candle marker ───────────────────────────
+    // White arrow: SHORT → down arrow above bar;  LONG → up arrow below bar
+    datetime tPB = iTime(_Symbol, PERIOD_CURRENT, pbBarIdx);
+    double arrowPB = isShort ? iHigh(_Symbol, PERIOD_CURRENT, pbBarIdx) + offset
+                              : iLow (_Symbol, PERIOD_CURRENT, pbBarIdx) - offset;
+    DrawArrow("RZY_PBMark_" + sfx, tPB, arrowPB, !isShort, clrWhite, 2);
+
+    // ── Structure levels (bounded, trimmed on close) ─────────────────
+    DrawHLine("RZY_Minor_"  + sfx, t1, t2, minorPx, InpMinorColor, 1, STYLE_DOT);
+    DrawHLine("RZY_PBPeak_" + sfx, t1, t2, pbPx,    InpPBColor,    1, STYLE_DOT);
+
+    // ── Order levels (bounded, trimmed on close) ─────────────────────
+    DrawHLine("RZY_Entry_" + sfx, t1, t2, entry, clrDodgerBlue, 2, STYLE_SOLID);
+    DrawHLine("RZY_SL_"    + sfx, t1, t2, sl,    clrRed,        1, STYLE_DASH);
+    DrawHLine("RZY_TP_"    + sfx, t1, t2, tp,    clrLime,       1, STYLE_DASH);
+
+    // ── Label ────────────────────────────────────────────────────────
+    color lblClr = isShort ? clrOrange : clrLimeGreen;
+    DrawLabel("RZY_Lbl_" + sfx, t1, entry,
+              StringFormat(" %s#%d  SL:%.2f  TP:%.2f  RR:1:%.1f", direction, g_drawCount, sl, tp, rr),
               lblClr);
 }
