@@ -47,7 +47,11 @@
 //|    · Rule 9: Post-TP cooldown (20 min if big move follows TP)  |
 //|    · Detailed alert output with all key price levels            |
 //|                                                                  |
-//|  v1.03  2026-04-28  — [in development]                          |
+//|  v1.03  2026-04-28  — Limit-order entry + pips-based TP/SL      |
+//|    · Entry: SELL LIMIT / BUY LIMIT at minor low/high exactly    |
+//|    · TP: fixed pips from entry (InpTPPips, default 150)         |
+//|    · SL: manual pips (InpSLPips) OR pullback ±2 pip default     |
+//|    · HasPendingOrder() gate prevents re-placing same limit       |
 //+------------------------------------------------------------------+
 #property copyright "Marci Silfrain Strategy EA"
 #property version   "1.03"
@@ -73,7 +77,8 @@ input double InpBigXMovePct       = 0.3;    // X% — impulse move size that def
                                             //   Forex: 1-2%  |  Indices: 2-4%  |  Crypto: 5%+
 input double InpYMaxPct           = 600.0;  // Y% — max distance (minor pt → peak) as % of X move
                                             //   Hard cap at runtime: 90%. Set high to effectively disable.
-input double InpTPMultiplier      = 0.5;    // TP = this% × (midpoint → minor point distance)
+input double InpTPPips            = 150.0;  // Take Profit in pips from entry (minor low/high)
+input double InpSLPips            = 0.0;    // Stop Loss pips from entry (0 = pullback ±2 pip default)
 
 input group "=== Pullback Strength Gates ==="
 input double InpMinImpulsePips    = 5.0;    // Minimum impulse size (pips) — filters noise
@@ -169,7 +174,7 @@ void OnTick()
     if(curBar == lastBar) return;
     lastBar = curBar;
 
-    if(HasOpenPosition()) return;
+    if(HasOpenPosition() || HasPendingOrder()) return;
     RunStrategy();
 }
 
@@ -223,6 +228,19 @@ bool HasOpenPosition()
         if(PositionGetTicket(i) > 0)
             if(PositionGetString(POSITION_SYMBOL) == _Symbol &&
                (ulong)PositionGetInteger(POSITION_MAGIC) == (ulong)InpMagicNumber)
+                return true;
+    return false;
+}
+
+//+------------------------------------------------------------------+
+//| Own pending-order check — prevents re-placing limit on same bar  |
+//+------------------------------------------------------------------+
+bool HasPendingOrder()
+{
+    for(int i = OrdersTotal() - 1; i >= 0; i--)
+        if(OrderGetTicket(i) > 0)
+            if(OrderGetString(ORDER_SYMBOL) == _Symbol &&
+               (ulong)OrderGetInteger(ORDER_MAGIC) == (ulong)InpMagicNumber)
                 return true;
     return false;
 }
@@ -285,29 +303,26 @@ void RunStrategy()
            && ConfirmShortEntry(closes, highs, lows, pbBar, peakPx, minorPx,
                                 InpMaxPullbackPct, InpMaxZoneCandles, effectivePbPx))
         {
-            double curPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
             bool filtered = (InpUseBigMoveCooldown && IsBigMoveCooldown("SHORT", opens, closes, InpCandleCount))
-                         || (InpUseKeyLevelFilter  && IsNearKeyLevel(curPrice, "SHORT"));
+                         || (InpUseKeyLevelFilter  && IsNearKeyLevel(minorPx, "SHORT"));
 
             if(!filtered)
             {
-                // Rule 3: calculate TP and SL using effectivePbPx
-                double midpoint     = (peakPx + minorPx) / 2.0;
-                double distMidMinor = midpoint - minorPx;
-                double tpPx         = minorPx - distMidMinor * (InpTPMultiplier / 100.0);
-                double slOpt1       = midpoint       + pipVal * 2.0;
-                double slOpt2       = effectivePbPx  + pipVal * 2.0;
-                double slPx         = MathMin(slOpt1, slOpt2);
+                // Entry exactly at minor low (limit order)
+                double entryPx = minorPx;
+                double tpPx    = entryPx - InpTPPips * pipVal;
+                double slPx    = (InpSLPips > 0.0) ? entryPx + InpSLPips * pipVal
+                                                    : effectivePbPx + pipVal * 2.0;
 
-                double risk   = slPx    - curPrice;
-                double reward = curPrice - tpPx;
+                double risk   = slPx   - entryPx;
+                double reward = entryPx - tpPx;
                 double rr     = (risk > 0 && reward > 0) ? reward / risk : 0;
 
                 if(rr >= InpMinRR)
                 {
-                    double lots    = CalcLots(curPrice, slPx);
-                    string summary = BuildSummary("SHORT", curPrice, slPx, tpPx, rr,
-                                                  peakPx, minorPx, effectivePbPx, midpoint, lots);
+                    double lots    = CalcLots(entryPx, slPx);
+                    string summary = BuildSummary("SHORT", entryPx, slPx, tpPx, rr,
+                                                  peakPx, minorPx, effectivePbPx, lots);
                     // Find prior body low (base of X% move) — oldest bar beyond peak
                     double priorBodLow_s = DBL_MAX; int priorBodBar_s = peakBar + 1;
                     for(int j = peakBar + 1; j < InpCandleCount; j++)
@@ -320,13 +335,14 @@ void RunStrategy()
                                  priorBodBar_s, priorBodLow_s,
                                  minorBar, pbBar,
                                  minorPx, effectivePbPx,
-                                 curPrice, slPx, tpPx, rr, "SHORT");
+                                 entryPx, slPx, tpPx, rr, "SHORT");
                     Comment(summary);
 
                     if(InpManualConfirm)
                         Alert("MARCI EA  >>>  SHORT SETUP on ", _Symbol, "\n\n", summary);
                     else if(lots > 0)
-                        if(!Trade.Sell(lots, _Symbol, curPrice, slPx, tpPx, "Marci_MM_SHORT"))
+                        if(!Trade.SellLimit(lots, entryPx, _Symbol, slPx, tpPx,
+                                            ORDER_TIME_GTC, 0, "Marci_MM_SHORT"))
                             Print("Order failed: ", Trade.ResultRetcodeDescription());
 
                     g_execShortPeakPx = peakPx;  // mark structure as traded; reset on structure expiry
@@ -362,29 +378,26 @@ void RunStrategy()
            && ConfirmLongEntry(closes, highs, lows, pbBar, troughPx, minorPx,
                                InpMaxPullbackPct, InpMaxZoneCandles, effectivePbPx))
         {
-            double curPrice = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-
             if(InpUseBigMoveCooldown && IsBigMoveCooldown("LONG", opens, closes, InpCandleCount))
                 return;
-            if(InpUseKeyLevelFilter  && IsNearKeyLevel(curPrice, "LONG"))
+            if(InpUseKeyLevelFilter  && IsNearKeyLevel(minorPx, "LONG"))
                 return;
 
-            double midpoint     = (troughPx + minorPx) / 2.0;
-            double distMidMinor = minorPx - midpoint;
-            double tpPx         = minorPx + distMidMinor * (InpTPMultiplier / 100.0);
-            double slOpt1       = midpoint      - pipVal * 2.0;
-            double slOpt2       = effectivePbPx - pipVal * 2.0;
-            double slPx         = MathMax(slOpt1, slOpt2);
+            // Entry exactly at minor high (limit order)
+            double entryPx = minorPx;
+            double tpPx    = entryPx + InpTPPips * pipVal;
+            double slPx    = (InpSLPips > 0.0) ? entryPx - InpSLPips * pipVal
+                                                : effectivePbPx - pipVal * 2.0;
 
-            double risk   = curPrice - slPx;
-            double reward = tpPx     - curPrice;
+            double risk   = entryPx - slPx;
+            double reward = tpPx    - entryPx;
             if(risk <= 0 || reward <= 0) return;
             double rr = reward / risk;
             if(rr < InpMinRR) return;
 
-            double lots    = CalcLots(curPrice, slPx);
-            string summary = BuildSummary("LONG", curPrice, slPx, tpPx, rr,
-                                          troughPx, minorPx, effectivePbPx, midpoint, lots);
+            double lots    = CalcLots(entryPx, slPx);
+            string summary = BuildSummary("LONG", entryPx, slPx, tpPx, rr,
+                                          troughPx, minorPx, effectivePbPx, lots);
 
             // Find prior body high (base of X% move) — oldest bar beyond trough
             double priorBodHigh_l = 0.0; int priorBodBar_l = troughBar + 1;
@@ -398,7 +411,7 @@ void RunStrategy()
                          priorBodBar_l, priorBodHigh_l,
                          minorBar, pbBar,
                          minorPx, effectivePbPx,
-                         curPrice, slPx, tpPx, rr, "LONG");
+                         entryPx, slPx, tpPx, rr, "LONG");
             Comment(summary);
 
             if(InpManualConfirm)
@@ -406,7 +419,8 @@ void RunStrategy()
             else
             {
                 if(lots > 0)
-                    if(!Trade.Buy(lots, _Symbol, curPrice, slPx, tpPx, "Marci_MM_LONG"))
+                    if(!Trade.BuyLimit(lots, entryPx, _Symbol, slPx, tpPx,
+                                       ORDER_TIME_GTC, 0, "Marci_MM_LONG"))
                         Print("Order failed: ", Trade.ResultRetcodeDescription());
             }
             g_execLongTrPx = troughPx;  // mark structure as traded; reset on structure expiry
@@ -655,8 +669,7 @@ bool ConfirmShortEntry(
     }
 
     double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-    if(bid <= minorPx)              return true;
-    return (bid > minorPx && bid < effectivePbPx);
+    return (bid > minorPx);  // limit has not been crossed; zone conditions confirmed above
 }
 
 //+------------------------------------------------------------------+
@@ -697,8 +710,7 @@ bool ConfirmLongEntry(
     }
 
     double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-    if(ask >= minorPx)              return true;
-    return (ask < minorPx && ask > effectivePbPx);
+    return (ask < minorPx);  // limit has not been crossed; zone conditions confirmed above
 }
 
 //+------------------------------------------------------------------+
@@ -887,7 +899,7 @@ double CalcLots(double entry, double stopLoss)
 string BuildSummary(
     string dir,
     double entry, double sl, double tp, double rr,
-    double peakPx, double minorPx, double pbPx, double midpoint,
+    double peakPx, double minorPx, double pbPx,
     double lots)
 {
     string session  = GetCurrentSessionName();
@@ -918,7 +930,9 @@ string BuildSummary(
                        DoubleToString(peakPx, _Digits));
     s += StringFormat("%-17s: %s\n", peakLabel,             DoubleToString(peakPx,   _Digits));
     s += StringFormat("%-17s: %s\n", minorLabel,            DoubleToString(minorPx,  _Digits));
-    s += StringFormat("Midpoint Price   : %s\n",             DoubleToString(midpoint, _Digits));
+    double tpPips  = (pipVal > 0) ? MathAbs(tp - entry)  / pipVal : 0;
+    double slPips  = (pipVal > 0) ? MathAbs(sl - entry)  / pipVal : 0;
+    s += StringFormat("TP / SL (pips)   : %.1f / %.1f\n",   tpPips, slPips);
     s += StringFormat("Pullback Peak    : %s\n",             DoubleToString(pbPx,     _Digits));
     return s;
 }
