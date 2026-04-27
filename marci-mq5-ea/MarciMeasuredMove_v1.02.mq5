@@ -23,7 +23,7 @@
 //|    · Trend leg + pullback strength gates (pips + Fib %)        |
 //|    · Risk-based lot sizing (% of balance)                       |
 //|    · Chart lines: Entry / Stop Loss / Target                    |
-//|    · Gap guard — skips bar if open outside prior bar range      |
+//|    · Gap guard — skips daily open if outside prior bar range    |
 //|                                                                  |
 //|  v1.01  2026-04-14  — Big Move Cooldown filter                  |
 //|    · Block SHORT for N bars after price drops >= X%            |
@@ -203,8 +203,11 @@ void RunStrategy()
     if(CopyClose(_Symbol, PERIOD_CURRENT, 1, InpCandleCount, closes) < InpCandleCount) return;
     if(CopyOpen (_Symbol, PERIOD_CURRENT, 1, InpCandleCount, opens)  < InpCandleCount) return;
 
-    //── Pre-check 1: Gap guard ──────────────────────────────────────
-    if(opens[0] > highs[1] || opens[0] < lows[1]) return;
+    //── Pre-check 1: Gap guard (daily open only) ────────────────────
+    datetime t_curr = iTime(_Symbol, PERIOD_CURRENT, 1);
+    datetime t_prev = iTime(_Symbol, PERIOD_CURRENT, 2);
+    bool is_new_day = (MathFloor((double)t_curr / 86400) != MathFloor((double)t_prev / 86400));
+    if(is_new_day && (opens[0] > highs[1] || opens[0] < lows[1])) return;
 
     //── Pre-check 2: ICT session filter (Rule 8) ───────────────────
     if(!IsInTradingSession()) return;

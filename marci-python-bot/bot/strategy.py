@@ -450,9 +450,11 @@ def _fetch(symbol: str, tf_str: str, count: int) -> Optional[pd.DataFrame]:
 # ── Gap guard ─────────────────────────────────────────────────────────────────
 
 def _gap_guard(df: pd.DataFrame) -> bool:
-    """Return True (pass) if the most recent bar opened inside the prior bar's range."""
+    """At daily opens only, block if the current bar opened outside the prior bar's range."""
     if len(df) < 2:
         return False
+    if df["time"].iloc[-1].date() == df["time"].iloc[-2].date():
+        return True  # intraday bar — gap guard not applied
     o0 = df["o"].iloc[-1]
     h1 = df["h"].iloc[-2]
     l1 = df["l"].iloc[-2]
