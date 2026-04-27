@@ -86,6 +86,9 @@ class StrategyConfig:
     # Entry zone candle limit (Rule 5)
     max_zone_candles: int = 3              # max candles allowed to close inside minor↔pb zone
 
+    # Structure timing gates (Rules 1-4)
+    max_structure_bars: int = 5            # minor must form within N bars of peak; pb within N bars of minor
+
     # Trade settings
     magic:    int = 20260412
     slippage: int = 20
@@ -259,153 +262,178 @@ def is_near_key_level(symbol: str, price: float,
 
 def _find_short_setup(
     highs: np.ndarray, lows: np.ndarray,
+    opens: np.ndarray, closes: np.ndarray,
     cfg: StrategyConfig, pip: float,
 ) -> Optional[dict]:
     """
-    Locate a SHORT setup structure.
-    Returns a dict of key indices/prices or None if not found.
+    Scan for a SHORT structure, trying candidate peaks from most recent to oldest.
+
+    X% is measured body-to-body (top of peak candle body → bottom of prior candle bodies)
+    rather than wick-to-wick, filtering out spike noise.
+
+    For each peak that meets the X% gate:
+      - Minor low must form within max_structure_bars bars of the peak.
+      - Pullback peak must form within max_structure_bars bars of the minor low.
+    If either timing constraint fails, that peak is discarded and the search
+    restarts from step 1 with the next candidate (re-evaluate from scratch).
     """
-    n = len(highs)
+    n    = len(highs)
     if n < 6:
         return None
-
     y_max = min(cfg.y_max_pct, 90.0)
+    max_s = cfg.max_structure_bars
 
-    # Step 1 — PEAK: absolute highest high in lookback
-    peak_idx = int(np.argmax(highs))
-    peak_px  = float(highs[peak_idx])
+    for peak_idx in range(n - 1, -1, -1):
+        if peak_idx < 1:
+            continue
+        peak_px = float(highs[peak_idx])  # wick high — used for structural comparisons
 
-    # Need enough bars after peak
-    bars_after = n - peak_idx - 1
-    if bars_after < 4:
-        return None
+        # Step 1 — X% UP move (body-to-body)
+        peak_body      = float(max(opens[peak_idx], closes[peak_idx]))
+        prior_body_low = float(min(
+            np.min(opens[:peak_idx + 1]),
+            np.min(closes[:peak_idx + 1])
+        ))
+        if prior_body_low == 0:
+            continue
+        x_move_px  = peak_body - prior_body_low
+        if x_move_px <= 0:
+            continue
+        x_move_pct = x_move_px / prior_body_low * 100.0
+        if x_move_pct < cfg.big_x_move_pct:
+            continue
 
-    # Step 2 — Validate X% UP move (prior low is in bars UP TO and including peak)
-    prior_low   = float(np.min(lows[:peak_idx + 1]))
-    x_move_px   = peak_px - prior_low
-    if x_move_px <= 0 or prior_low == 0:
-        return None
-    x_move_pct  = x_move_px / prior_low * 100.0
-    if x_move_pct < cfg.big_x_move_pct:
-        return None
+        # Step 2 — MINOR LOW: within max_s bars after peak
+        minor_end = min(peak_idx + 1 + max_s, n)
+        if minor_end <= peak_idx + 1:
+            continue
+        minor_local = int(np.argmin(lows[peak_idx + 1 : minor_end]))
+        minor_idx   = peak_idx + 1 + minor_local
+        minor_px    = float(lows[minor_idx])
 
-    # Step 3 — PULLBACK PEAK: highest high in bars AFTER peak
-    seg = highs[peak_idx + 1:]
-    pb_local = int(np.argmax(seg))
-    pb_idx   = peak_idx + 1 + pb_local
-    pb_px    = float(highs[pb_idx])
+        # Step 3 — PULLBACK PEAK: within max_s bars after minor
+        pb_end = min(minor_idx + 1 + max_s, n)
+        if pb_end <= minor_idx + 1:
+            continue
+        pb_seg   = highs[minor_idx + 1 : pb_end]
+        if len(pb_seg) == 0:
+            continue
+        pb_local = int(np.argmax(pb_seg))
+        pb_idx   = minor_idx + 1 + pb_local
+        pb_px    = float(highs[pb_idx])
 
-    if pb_px >= peak_px:        # must be a lower high
-        return None
-    if n - pb_idx - 1 < 2:     # need 2 confirmed bars after pb peak
-        return None
+        if pb_px >= peak_px:
+            continue
+        if minor_px >= pb_px:
+            continue
+        if n - pb_idx - 1 < 2:
+            continue
 
-    # Step 4 — MINOR LOW: lowest low strictly BETWEEN peak and pb peak
-    window = lows[peak_idx + 1 : pb_idx]
-    if len(window) < 1:
-        return None
-    minor_local = int(np.argmin(window))
-    minor_idx   = peak_idx + 1 + minor_local
-    minor_px    = float(lows[minor_idx])
+        # Step 4 — Y% gate
+        minor_dist = peak_px - minor_px
+        if minor_dist <= 0 or minor_dist > (y_max / 100.0) * x_move_px:
+            continue
 
-    if minor_px >= pb_px:       # minor must be below pullback peak
-        return None
+        # Step 5 — Pullback depth
+        pb_depth = (pb_px - minor_px) / (peak_px - minor_px) * 100.0
+        if not (cfg.min_pullback_pct <= pb_depth <= cfg.max_pullback_pct):
+            continue
 
-    # Step 5 — Y% gate
-    minor_dist = peak_px - minor_px
-    if minor_dist <= 0:
-        return None
-    if minor_dist > (y_max / 100.0) * x_move_px:
-        return None
+        # Step 6 — Min impulse size
+        if pip > 0 and (minor_dist / pip) < cfg.min_impulse_pips:
+            continue
 
-    # Step 6 — Pullback depth
-    pb_depth = (pb_px - minor_px) / (peak_px - minor_px) * 100.0
-    if not (cfg.min_pullback_pct <= pb_depth <= cfg.max_pullback_pct):
-        return None
+        return dict(peak_idx=peak_idx, peak_px=peak_px,
+                    minor_idx=minor_idx, minor_px=minor_px,
+                    pb_idx=pb_idx, pb_px=pb_px,
+                    x_move_pct=x_move_pct)
 
-    # Step 7 — Min impulse size
-    if pip > 0 and (minor_dist / pip) < cfg.min_impulse_pips:
-        return None
-
-    return dict(peak_idx=peak_idx, peak_px=peak_px,
-                minor_idx=minor_idx, minor_px=minor_px,
-                pb_idx=pb_idx, pb_px=pb_px,
-                x_move_pct=x_move_pct)
+    return None
 
 
 def _find_long_setup(
     highs: np.ndarray, lows: np.ndarray,
+    opens: np.ndarray, closes: np.ndarray,
     cfg: StrategyConfig, pip: float,
 ) -> Optional[dict]:
     """
-    Locate a LONG setup structure (mirror of SHORT).
-    Temporal sequence: TROUGH → MINOR HIGH → PB TROUGH → current
+    Mirror of _find_short_setup for LONG (TROUGH → MINOR HIGH → PB TROUGH).
+    X% is measured body-to-body (bottom of trough candle body → top of prior bodies).
+    Timing constraint: minor high within max_structure_bars bars of trough;
+    pullback trough within max_structure_bars bars of minor high.
     """
-    n = len(highs)
+    n    = len(highs)
     if n < 6:
         return None
-
     y_max = min(cfg.y_max_pct, 90.0)
+    max_s = cfg.max_structure_bars
 
-    # Step 1 — TROUGH: absolute lowest low
-    trough_idx = int(np.argmin(lows))
-    trough_px  = float(lows[trough_idx])
+    for trough_idx in range(n - 1, -1, -1):
+        if trough_idx < 1:
+            continue
+        trough_px = float(lows[trough_idx])  # wick low — used for structural comparisons
 
-    bars_after = n - trough_idx - 1
-    if bars_after < 4:
-        return None
+        # Step 1 — X% DOWN move (body-to-body)
+        trough_body     = float(min(opens[trough_idx], closes[trough_idx]))
+        prior_body_high = float(max(
+            np.max(opens[:trough_idx + 1]),
+            np.max(closes[:trough_idx + 1])
+        ))
+        if prior_body_high == 0:
+            continue
+        x_move_px  = prior_body_high - trough_body
+        if x_move_px <= 0:
+            continue
+        x_move_pct = x_move_px / prior_body_high * 100.0
+        if x_move_pct < cfg.big_x_move_pct:
+            continue
 
-    # Step 2 — Validate X% DOWN move
-    prior_high  = float(np.max(highs[:trough_idx + 1]))
-    x_move_px   = prior_high - trough_px
-    if x_move_px <= 0 or prior_high == 0:
-        return None
-    x_move_pct  = x_move_px / prior_high * 100.0
-    if x_move_pct < cfg.big_x_move_pct:
-        return None
+        # Step 2 — MINOR HIGH: within max_s bars after trough
+        minor_end = min(trough_idx + 1 + max_s, n)
+        if minor_end <= trough_idx + 1:
+            continue
+        minor_local = int(np.argmax(highs[trough_idx + 1 : minor_end]))
+        minor_idx   = trough_idx + 1 + minor_local
+        minor_px    = float(highs[minor_idx])
 
-    # Step 3 — PULLBACK TROUGH: lowest low in bars AFTER trough
-    seg      = lows[trough_idx + 1:]
-    pb_local = int(np.argmin(seg))
-    pb_idx   = trough_idx + 1 + pb_local
-    pb_px    = float(lows[pb_idx])
+        # Step 3 — PULLBACK TROUGH: within max_s bars after minor
+        pb_end = min(minor_idx + 1 + max_s, n)
+        if pb_end <= minor_idx + 1:
+            continue
+        pb_seg   = lows[minor_idx + 1 : pb_end]
+        if len(pb_seg) == 0:
+            continue
+        pb_local = int(np.argmin(pb_seg))
+        pb_idx   = minor_idx + 1 + pb_local
+        pb_px    = float(lows[pb_idx])
 
-    if pb_px <= trough_px:      # must be a higher low
-        return None
-    if n - pb_idx - 1 < 2:
-        return None
+        if pb_px <= trough_px:
+            continue
+        if minor_px <= pb_px:
+            continue
+        if n - pb_idx - 1 < 2:
+            continue
 
-    # Step 4 — MINOR HIGH: highest high strictly BETWEEN trough and pb trough
-    window = highs[trough_idx + 1 : pb_idx]
-    if len(window) < 1:
-        return None
-    minor_local = int(np.argmax(window))
-    minor_idx   = trough_idx + 1 + minor_local
-    minor_px    = float(highs[minor_idx])
+        # Step 4 — Y% gate
+        minor_dist = minor_px - trough_px
+        if minor_dist <= 0 or minor_dist > (y_max / 100.0) * x_move_px:
+            continue
 
-    if minor_px <= pb_px:       # minor must be above pullback trough
-        return None
+        # Step 5 — Pullback depth
+        pb_depth = (minor_px - pb_px) / (minor_px - trough_px) * 100.0
+        if not (cfg.min_pullback_pct <= pb_depth <= cfg.max_pullback_pct):
+            continue
 
-    # Step 5 — Y% gate
-    minor_dist = minor_px - trough_px
-    if minor_dist <= 0:
-        return None
-    if minor_dist > (y_max / 100.0) * x_move_px:
-        return None
+        # Step 6 — Min impulse size
+        if pip > 0 and (minor_dist / pip) < cfg.min_impulse_pips:
+            continue
 
-    # Step 6 — Pullback depth
-    pb_depth = (minor_px - pb_px) / (minor_px - trough_px) * 100.0
-    if not (cfg.min_pullback_pct <= pb_depth <= cfg.max_pullback_pct):
-        return None
+        return dict(trough_idx=trough_idx, trough_px=trough_px,
+                    minor_idx=minor_idx, minor_px=minor_px,
+                    pb_idx=pb_idx, pb_px=pb_px,
+                    x_move_pct=x_move_pct)
 
-    # Step 7 — Min impulse size
-    if pip > 0 and (minor_dist / pip) < cfg.min_impulse_pips:
-        return None
-
-    return dict(trough_idx=trough_idx, trough_px=trough_px,
-                minor_idx=minor_idx, minor_px=minor_px,
-                pb_idx=pb_idx, pb_px=pb_px,
-                x_move_pct=x_move_pct)
+    return None
 
 
 # ── Rule 5: Entry confirmation ────────────────────────────────────────────────
@@ -580,7 +608,7 @@ def find_setup(cfg: StrategyConfig) -> Optional[TradeSetup]:
         return None
 
     # ── Try SHORT ─────────────────────────────────────────────────────────────
-    s = _find_short_setup(highs, lows, cfg, pip)
+    s = _find_short_setup(highs, lows, opens, closes, cfg, pip)
     if s:
         enter, pb_px = _confirm_short_entry(s, highs, lows, closes, float(tick.bid), cfg)
         if enter:
@@ -622,7 +650,7 @@ def find_setup(cfg: StrategyConfig) -> Optional[TradeSetup]:
                     )
 
     # ── Try LONG ──────────────────────────────────────────────────────────────
-    lg = _find_long_setup(highs, lows, cfg, pip)
+    lg = _find_long_setup(highs, lows, opens, closes, cfg, pip)
     if lg:
         enter, pb_px = _confirm_long_entry(lg, highs, lows, closes, float(tick.ask), cfg)
         if enter:

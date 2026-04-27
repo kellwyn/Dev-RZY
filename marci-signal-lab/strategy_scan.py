@@ -41,63 +41,85 @@ class HistSetup:
 # ── Rule 1–6: SHORT structure ─────────────────────────────────────────────────
 
 def _find_short(
-    highs: np.ndarray, lows: np.ndarray, closes: np.ndarray,
+    highs: np.ndarray, lows: np.ndarray,
+    opens: np.ndarray, closes: np.ndarray,
     pip: float, cfg: LabConfig,
 ) -> Optional[dict]:
     n = len(highs)
     if n < 6:
         return None
     y_max = min(cfg.y_max_pct, 90.0)
+    max_s = cfg.max_structure_bars
 
-    # Rule 1: PEAK — absolute highest high in window
-    peak_idx = int(np.argmax(highs))
-    peak_px  = float(highs[peak_idx])
-    if n - peak_idx - 1 < 4:
-        return None
+    # Try candidate peaks from most recent to oldest.
+    # Minor low must form within max_s bars of peak; pb within max_s bars of minor.
+    # If timing fails, discard and retry from step 1 with the next candidate.
+    peak_idx = None
+    peak_px = minor_idx = minor_px = pb_idx = pb_px = x_pct = x_move_px = None
 
-    # Rule 1: validate X% UP move (prior low → peak)
-    prior_low  = float(np.min(lows[:peak_idx + 1]))
-    x_move_px  = peak_px - prior_low
-    if x_move_px <= 0 or prior_low == 0:
-        return None
-    x_pct = x_move_px / prior_low * 100.0
-    if x_pct < cfg.big_x_move_pct:
-        return None
+    for p_idx in range(n - 1, -1, -1):
+        if p_idx < 1:
+            continue
+        p_px = float(highs[p_idx])
 
-    # Rule 2: PULLBACK PEAK — highest high in bars AFTER peak (lower high)
-    seg      = highs[peak_idx + 1:]
-    pb_local = int(np.argmax(seg))
-    pb_idx   = peak_idx + 1 + pb_local
-    pb_px    = float(highs[pb_idx])
-    if pb_px >= peak_px:
-        return None
-    if n - pb_idx - 1 < 2:     # need 2 confirmed bars after pb peak
-        return None
+        # Rule 1: X% UP move (body-to-body)
+        p_body         = float(max(opens[p_idx], closes[p_idx]))
+        prior_body_low = float(min(
+            np.min(opens[:p_idx + 1]),
+            np.min(closes[:p_idx + 1])
+        ))
+        if prior_body_low == 0:
+            continue
+        x_mv = p_body - prior_body_low
+        if x_mv <= 0:
+            continue
+        x_p = x_mv / prior_body_low * 100.0
+        if x_p < cfg.big_x_move_pct:
+            continue
 
-    # Rule 2: MINOR LOW — lowest low strictly BETWEEN peak and pullback peak
-    window = lows[peak_idx + 1:pb_idx]
-    if len(window) < 1:
-        return None
-    minor_local = int(np.argmin(window))
-    minor_idx   = peak_idx + 1 + minor_local
-    minor_px    = float(lows[minor_idx])
-    if minor_px >= pb_px:
-        return None
+        # Rule 2: MINOR LOW within max_s bars after peak
+        mn_end = min(p_idx + 1 + max_s, n)
+        if mn_end <= p_idx + 1:
+            continue
+        mn_local = int(np.argmin(lows[p_idx + 1 : mn_end]))
+        mn_idx   = p_idx + 1 + mn_local
+        mn_px    = float(lows[mn_idx])
 
-    # Y% gate — minor point stays minor vs the X move
-    minor_dist = peak_px - minor_px
-    if minor_dist <= 0:
-        return None
-    if minor_dist > (y_max / 100.0) * x_move_px:
-        return None
+        # Rule 2: PULLBACK PEAK within max_s bars after minor
+        pb_end = min(mn_idx + 1 + max_s, n)
+        if pb_end <= mn_idx + 1:
+            continue
+        pb_seg = highs[mn_idx + 1 : pb_end]
+        if len(pb_seg) == 0:
+            continue
+        pb_loc = int(np.argmax(pb_seg))
+        pb_i   = mn_idx + 1 + pb_loc
+        pb_p   = float(highs[pb_i])
 
-    # Rule 4: pullback depth gate
-    pb_depth = (pb_px - minor_px) / (peak_px - minor_px) * 100.0
-    if not (cfg.min_pullback_pct <= pb_depth <= cfg.max_pullback_pct):
-        return None
+        if pb_p >= p_px or mn_px >= pb_p:
+            continue
+        if n - pb_i - 1 < 2:
+            continue
 
-    # Rule 4: minimum impulse size (pips)
-    if pip > 0 and (minor_dist / pip) < cfg.min_impulse_pips:
+        # Y% gate
+        mn_dist = p_px - mn_px
+        if mn_dist <= 0 or mn_dist > (y_max / 100.0) * x_mv:
+            continue
+
+        # Rule 4: pullback depth + min impulse
+        pb_depth = (pb_p - mn_px) / (p_px - mn_px) * 100.0
+        if not (cfg.min_pullback_pct <= pb_depth <= cfg.max_pullback_pct):
+            continue
+        if pip > 0 and (mn_dist / pip) < cfg.min_impulse_pips:
+            continue
+
+        peak_idx  = p_idx;  peak_px  = p_px
+        minor_idx = mn_idx; minor_px = mn_px
+        pb_idx    = pb_i;   pb_px    = pb_p
+        x_pct     = x_p;    x_move_px = x_mv
+        break
+
+    if peak_idx is None:
         return None
 
     # Rule 5: momentum — 2 declining closes after pullback peak
@@ -131,60 +153,80 @@ def _find_short(
 # ── Rule 1–6: LONG structure ──────────────────────────────────────────────────
 
 def _find_long(
-    highs: np.ndarray, lows: np.ndarray, closes: np.ndarray,
+    highs: np.ndarray, lows: np.ndarray,
+    opens: np.ndarray, closes: np.ndarray,
     pip: float, cfg: LabConfig,
 ) -> Optional[dict]:
     n = len(highs)
     if n < 6:
         return None
     y_max = min(cfg.y_max_pct, 90.0)
+    max_s = cfg.max_structure_bars
 
-    # Rule 1: TROUGH — absolute lowest low in window
-    trough_idx = int(np.argmin(lows))
-    trough_px  = float(lows[trough_idx])
-    if n - trough_idx - 1 < 4:
-        return None
+    trough_idx = minor_idx = minor_px = pb_idx = pb_px = x_pct = x_move_px = None
+    trough_px = None
 
-    # Rule 1: validate X% DOWN move (prior high → trough)
-    prior_high = float(np.max(highs[:trough_idx + 1]))
-    x_move_px  = prior_high - trough_px
-    if x_move_px <= 0 or prior_high == 0:
-        return None
-    x_pct = x_move_px / prior_high * 100.0
-    if x_pct < cfg.big_x_move_pct:
-        return None
+    for t_idx in range(n - 1, -1, -1):
+        if t_idx < 1:
+            continue
+        t_px = float(lows[t_idx])
 
-    # Rule 2: PULLBACK TROUGH — lowest low in bars AFTER trough (higher low)
-    seg      = lows[trough_idx + 1:]
-    pb_local = int(np.argmin(seg))
-    pb_idx   = trough_idx + 1 + pb_local
-    pb_px    = float(lows[pb_idx])
-    if pb_px <= trough_px:
-        return None
-    if n - pb_idx - 1 < 2:
-        return None
+        # Rule 1: X% DOWN move (body-to-body)
+        t_body          = float(min(opens[t_idx], closes[t_idx]))
+        prior_body_high = float(max(
+            np.max(opens[:t_idx + 1]),
+            np.max(closes[:t_idx + 1])
+        ))
+        if prior_body_high == 0:
+            continue
+        x_mv = prior_body_high - t_body
+        if x_mv <= 0:
+            continue
+        x_p = x_mv / prior_body_high * 100.0
+        if x_p < cfg.big_x_move_pct:
+            continue
 
-    # Rule 2: MINOR HIGH — highest high strictly BETWEEN trough and pb trough
-    window = highs[trough_idx + 1:pb_idx]
-    if len(window) < 1:
-        return None
-    minor_local = int(np.argmax(window))
-    minor_idx   = trough_idx + 1 + minor_local
-    minor_px    = float(highs[minor_idx])
-    if minor_px <= pb_px:
-        return None
+        # Rule 2: MINOR HIGH within max_s bars after trough
+        mn_end = min(t_idx + 1 + max_s, n)
+        if mn_end <= t_idx + 1:
+            continue
+        mn_local = int(np.argmax(highs[t_idx + 1 : mn_end]))
+        mn_idx   = t_idx + 1 + mn_local
+        mn_px    = float(highs[mn_idx])
 
-    minor_dist = minor_px - trough_px
-    if minor_dist <= 0:
-        return None
-    if minor_dist > (y_max / 100.0) * x_move_px:
-        return None
+        # Rule 2: PULLBACK TROUGH within max_s bars after minor
+        pb_end = min(mn_idx + 1 + max_s, n)
+        if pb_end <= mn_idx + 1:
+            continue
+        pb_seg = lows[mn_idx + 1 : pb_end]
+        if len(pb_seg) == 0:
+            continue
+        pb_loc = int(np.argmin(pb_seg))
+        pb_i   = mn_idx + 1 + pb_loc
+        pb_p   = float(lows[pb_i])
 
-    pb_depth = (minor_px - pb_px) / (minor_px - trough_px) * 100.0
-    if not (cfg.min_pullback_pct <= pb_depth <= cfg.max_pullback_pct):
-        return None
+        if pb_p <= t_px or mn_px <= pb_p:
+            continue
+        if n - pb_i - 1 < 2:
+            continue
 
-    if pip > 0 and (minor_dist / pip) < cfg.min_impulse_pips:
+        mn_dist = mn_px - t_px
+        if mn_dist <= 0 or mn_dist > (y_max / 100.0) * x_mv:
+            continue
+
+        pb_depth = (mn_px - pb_p) / (mn_px - t_px) * 100.0
+        if not (cfg.min_pullback_pct <= pb_depth <= cfg.max_pullback_pct):
+            continue
+        if pip > 0 and (mn_dist / pip) < cfg.min_impulse_pips:
+            continue
+
+        trough_idx = t_idx;  trough_px = t_px
+        minor_idx  = mn_idx; minor_px  = mn_px
+        pb_idx     = pb_i;   pb_px     = pb_p
+        x_pct      = x_p;    x_move_px = x_mv
+        break
+
+    if trough_idx is None:
         return None
 
     # Rule 5: momentum — 2 rising closes after pullback trough
@@ -233,6 +275,7 @@ def scan_setups(df: pd.DataFrame, cfg: LabConfig, pip: float) -> list[HistSetup]
 
     highs  = df["h"].values.astype(float)
     lows   = df["l"].values.astype(float)
+    opens  = df["o"].values.astype(float)
     closes = df["c"].values.astype(float)
 
     setups: list[HistSetup] = []
@@ -241,6 +284,7 @@ def scan_setups(df: pd.DataFrame, cfg: LabConfig, pip: float) -> list[HistSetup]
     for i in range(wnd, n):
         h = highs[i - wnd:i]
         l = lows[i - wnd:i]
+        o = opens[i - wnd:i]
         c = closes[i - wnd:i]
 
         row      = df.iloc[i - 1]
@@ -253,7 +297,7 @@ def scan_setups(df: pd.DataFrame, cfg: LabConfig, pip: float) -> list[HistSetup]
             key = (date_key, slot, direction)
             if key in seen:
                 continue
-            s = fn(h, l, c, pip, cfg)
+            s = fn(h, l, o, c, pip, cfg)
             if s is None:
                 continue
             seen.add(key)

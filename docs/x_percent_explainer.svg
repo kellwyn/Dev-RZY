@@ -1,0 +1,283 @@
+<svg width="940" height="520" xmlns="http://www.w3.org/2000/svg" font-family="'Courier New',monospace">
+
+  <!-- ═══════════════════════════════════════════════════════════════════
+       BACKGROUND
+  ════════════════════════════════════════════════════════════════════ -->
+  <rect width="940" height="520" fill="#0f1117"/>
+
+  <!-- ═══════════════════════════════════════════════════════════════════
+       TITLE
+  ════════════════════════════════════════════════════════════════════ -->
+  <text x="470" y="26" fill="#d0d0d0" font-size="14" font-weight="bold" text-anchor="middle">
+    X% Impulse — Measured on Candle BODY (open/close), not WICK (high/low)
+  </text>
+
+  <!-- ═══════════════════════════════════════════════════════════════════
+       CHART AREA  x=58..753  y=45..385
+       Price range 4686–4715 (29 units), height 340px → 11.72 px/unit
+       py(p) = 385 − (p − 4686) × 11.72
+       Key prices:
+         4711 → y=92    4709 → y=115   4707 → y=139   4706 → y=151
+         4703 → y=186   4702 → y=198   4700 → y=221
+         4696 → y=268   4694 → y=291   4692 → y=315
+         4690 → y=338   4688 → y=362
+  ════════════════════════════════════════════════════════════════════ -->
+  <rect x="58" y="45" width="695" height="340" fill="#0d1117" rx="3" stroke="#1e2030" stroke-width="1"/>
+
+  <!-- Subtle grid -->
+  <line x1="58" y1="221" x2="753" y2="221" stroke="#181f2e" stroke-width="1"/>
+  <line x1="58" y1="115" x2="753" y2="115" stroke="#1c2535" stroke-width="0.8" stroke-dasharray="4,5"/>
+  <line x1="58" y1="338" x2="753" y2="338" stroke="#1c2535" stroke-width="0.8" stroke-dasharray="4,5"/>
+  <line x1="58" y1="92"  x2="753" y2="92"  stroke="#181f2e" stroke-width="0.8" stroke-dasharray="2,6"/>
+  <line x1="58" y1="362" x2="753" y2="362" stroke="#181f2e" stroke-width="0.8" stroke-dasharray="2,6"/>
+
+  <!-- ═══════════════════════════════════════════════════════════════════
+       BAR HIGHLIGHTS (drawn first, behind candles)
+       Bar centers: 88,141,194,247,300,353,406,459,512,565,618,671
+  ════════════════════════════════════════════════════════════════════ -->
+
+  <!-- Bar 0 — PRIOR BODY LOW (orange) -->
+  <rect x="74" y="285" width="28" height="84" fill="#ff980012" rx="2"/>
+  <rect x="74" y="285" width="28" height="84" fill="none" stroke="#ff9800" stroke-width="1.5" stroke-dasharray="3,2" rx="2"/>
+
+  <!-- Bar 5 — PEAK (gold) -->
+  <rect x="339" y="85" width="28" height="74" fill="#ffd60014" rx="2"/>
+  <rect x="339" y="85" width="28" height="74" fill="none" stroke="#ffd600" stroke-width="1.5" stroke-dasharray="3,2" rx="2"/>
+
+  <!-- Bar 8 — MINOR LOW (purple) -->
+  <rect x="498" y="202" width="28" height="96" fill="#9c27b010" rx="2"/>
+  <rect x="498" y="202" width="28" height="96" fill="none" stroke="#9c27b0" stroke-width="1.5" stroke-dasharray="3,2" rx="2"/>
+
+  <!-- Bar 10 — PB PEAK (cyan) -->
+  <rect x="604" y="167" width="28" height="61" fill="#00bcd410" rx="2"/>
+  <rect x="604" y="167" width="28" height="61" fill="none" stroke="#00bcd4" stroke-width="1.5" stroke-dasharray="3,2" rx="2"/>
+
+  <!-- ═══════════════════════════════════════════════════════════════════
+       CANDLES  (wick = center line, body = filled rect)
+  ════════════════════════════════════════════════════════════════════ -->
+
+  <!-- Bar 0  x=88  BULLISH  o=4690 c=4693 h=4694 l=4688 -->
+  <line x1="88" y1="291" x2="88" y2="362" stroke="#4caf50" stroke-width="1.5"/>
+  <rect x="77" y="303" width="22" height="35" fill="#26a69a" rx="1"/>
+
+  <!-- Bar 1  x=141  BEARISH  o=4693 c=4691 h=4694 l=4690 -->
+  <line x1="141" y1="291" x2="141" y2="338" stroke="#ef5350" stroke-width="1.5"/>
+  <rect x="130" y="303" width="22" height="23" fill="#ef5350" rx="1"/>
+
+  <!-- Bar 2  x=194  BULLISH  o=4692 c=4696 h=4697 l=4691 -->
+  <line x1="194" y1="256" x2="194" y2="326" stroke="#4caf50" stroke-width="1.5"/>
+  <rect x="183" y="268" width="22" height="47" fill="#26a69a" rx="1"/>
+
+  <!-- Bar 3  x=247  BULLISH  o=4696 c=4702 h=4703 l=4695 -->
+  <line x1="247" y1="186" x2="247" y2="280" stroke="#4caf50" stroke-width="1.5"/>
+  <rect x="236" y="198" width="22" height="70" fill="#26a69a" rx="1"/>
+
+  <!-- Bar 4  x=300  BULLISH  o=4702 c=4707 h=4708 l=4701 -->
+  <line x1="300" y1="127" x2="300" y2="209" stroke="#4caf50" stroke-width="1.5"/>
+  <rect x="289" y="139" width="22" height="59" fill="#26a69a" rx="1"/>
+
+  <!-- Bar 5  x=353  PEAK — BULLISH  o=4707 c=4709 h=4711 l=4706 -->
+  <line x1="353" y1="92" x2="353" y2="151" stroke="#ffd600" stroke-width="2"/>
+  <rect x="342" y="115" width="22" height="24" fill="#ffd600" rx="1"/>
+
+  <!-- Bar 6  x=406  BEARISH  o=4709 c=4705 h=4710 l=4704 -->
+  <line x1="406" y1="104" x2="406" y2="174" stroke="#ef5350" stroke-width="1.5"/>
+  <rect x="395" y="115" width="22" height="47" fill="#ef5350" rx="1"/>
+
+  <!-- Bar 7  x=459  BEARISH  o=4705 c=4700 h=4706 l=4698 -->
+  <line x1="459" y1="151" x2="459" y2="244" stroke="#ef5350" stroke-width="1.5"/>
+  <rect x="448" y="162" width="22" height="59" fill="#ef5350" rx="1"/>
+
+  <!-- Bar 8  x=512  MINOR LOW — BEARISH  o=4700 c=4696 h=4701 l=4694 -->
+  <line x1="512" y1="209" x2="512" y2="291" stroke="#ce93d8" stroke-width="1.5"/>
+  <rect x="501" y="221" width="22" height="47" fill="#9c27b0" rx="1"/>
+
+  <!-- Bar 9  x=565  BULLISH  o=4696 c=4700 h=4701 l=4695 -->
+  <line x1="565" y1="209" x2="565" y2="280" stroke="#4caf50" stroke-width="1.5"/>
+  <rect x="554" y="221" width="22" height="47" fill="#26a69a" rx="1"/>
+
+  <!-- Bar 10  x=618  PB PEAK — BULLISH  o=4700 c=4703 h=4704 l=4699 -->
+  <line x1="618" y1="174" x2="618" y2="233" stroke="#00e5ff" stroke-width="2"/>
+  <rect x="607" y="186" width="22" height="35" fill="#00bcd4" rx="1"/>
+
+  <!-- Bar 11  x=671  BEARISH  o=4703 c=4700 h=4704 l=4698 -->
+  <line x1="671" y1="174" x2="671" y2="244" stroke="#ef5350" stroke-width="1.5"/>
+  <rect x="660" y="186" width="22" height="35" fill="#ef5350" rx="1"/>
+
+  <!-- ═══════════════════════════════════════════════════════════════════
+       REFERENCE LINES — extend past chart into arrow zone
+  ════════════════════════════════════════════════════════════════════ -->
+
+  <!-- Peak body top 4709 → y=115  (gold dashed) -->
+  <line x1="58" y1="115" x2="850" y2="115" stroke="#ffd600" stroke-width="1" stroke-dasharray="6,4" opacity="0.55"/>
+
+  <!-- Prior body low 4690 → y=338  (orange dashed) -->
+  <line x1="58" y1="338" x2="850" y2="338" stroke="#ff9800" stroke-width="1" stroke-dasharray="6,4" opacity="0.55"/>
+
+  <!-- Peak wick high 4711 → y=92  (dark gray dashed) -->
+  <line x1="58" y1="92" x2="830" y2="92" stroke="#556" stroke-width="0.8" stroke-dasharray="2,6" opacity="0.7"/>
+
+  <!-- Prior wick low 4688 → y=362  (dark gray dashed) -->
+  <line x1="58" y1="362" x2="830" y2="362" stroke="#556" stroke-width="0.8" stroke-dasharray="2,6" opacity="0.7"/>
+
+  <!-- ═══════════════════════════════════════════════════════════════════
+       ARROWHEAD MARKERS
+  ════════════════════════════════════════════════════════════════════ -->
+  <defs>
+    <!-- Blue filled arrowhead (body measurement) -->
+    <marker id="ab-end" markerWidth="8" markerHeight="8" refX="8" refY="4" orient="auto">
+      <polygon points="0,0 8,4 0,8" fill="#2196f3"/>
+    </marker>
+    <marker id="ab-start" markerWidth="8" markerHeight="8" refX="0" refY="4" orient="auto-start-reverse">
+      <polygon points="0,0 8,4 0,8" fill="#2196f3"/>
+    </marker>
+    <!-- Gray dashed arrowhead (wick comparison) -->
+    <marker id="ag-end" markerWidth="7" markerHeight="7" refX="7" refY="3.5" orient="auto">
+      <polygon points="0,0 7,3.5 0,7" fill="#556"/>
+    </marker>
+    <marker id="ag-start" markerWidth="7" markerHeight="7" refX="0" refY="3.5" orient="auto-start-reverse">
+      <polygon points="0,0 7,3.5 0,7" fill="#556"/>
+    </marker>
+  </defs>
+
+  <!-- ═══════════════════════════════════════════════════════════════════
+       BODY MEASUREMENT ARROW  (BLUE SOLID)  x=780
+       From prior body low y=338 → peak body top y=115
+  ════════════════════════════════════════════════════════════════════ -->
+  <line x1="780" y1="330" x2="780" y2="123"
+        stroke="#2196f3" stroke-width="2.5"
+        marker-start="url(#ab-start)" marker-end="url(#ab-end)"/>
+
+  <!-- Tick lines connecting dashes to body arrow -->
+  <line x1="753" y1="115" x2="783" y2="115" stroke="#2196f3" stroke-width="1" opacity="0.6"/>
+  <line x1="753" y1="338" x2="783" y2="338" stroke="#2196f3" stroke-width="1" opacity="0.6"/>
+
+  <!-- BODY arrow label -->
+  <rect x="757" y="212" width="17" height="44" fill="#0a1a30" rx="2"/>
+  <text x="765" y="228" fill="#2196f3" font-size="9" text-anchor="middle" font-weight="bold">BO</text>
+  <text x="765" y="240" fill="#2196f3" font-size="9" text-anchor="middle" font-weight="bold">DY</text>
+  <text x="765" y="252" fill="#64b5f6" font-size="8" text-anchor="middle">✓</text>
+
+  <!-- ═══════════════════════════════════════════════════════════════════
+       WICK MEASUREMENT ARROW  (GRAY DASHED)  x=808
+       From prior wick low y=362 → peak wick high y=92
+  ════════════════════════════════════════════════════════════════════ -->
+  <line x1="808" y1="354" x2="808" y2="100"
+        stroke="#556" stroke-width="1.5" stroke-dasharray="4,3"
+        marker-start="url(#ag-start)" marker-end="url(#ag-end)"/>
+
+  <!-- Tick lines connecting dashes to wick arrow -->
+  <line x1="753" y1="92"  x2="811" y2="92"  stroke="#444" stroke-width="0.8" opacity="0.5"/>
+  <line x1="753" y1="362" x2="811" y2="362" stroke="#444" stroke-width="0.8" opacity="0.5"/>
+
+  <!-- WICK arrow label -->
+  <text x="816" y="227" fill="#556" font-size="8" text-anchor="start">WI</text>
+  <text x="816" y="237" fill="#556" font-size="8" text-anchor="start">CK</text>
+  <text x="816" y="247" fill="#c0392b" font-size="9" text-anchor="start" font-weight="bold">✗</text>
+
+  <!-- ═══════════════════════════════════════════════════════════════════
+       PRICE AXIS LABELS (left of chart)
+  ════════════════════════════════════════════════════════════════════ -->
+  <text x="53" y="95"  fill="#ffd600" font-size="9" text-anchor="end" opacity="0.6">4711</text>
+  <text x="53" y="118" fill="#ffd600" font-size="9" text-anchor="end">4709</text>
+  <text x="53" y="224" fill="#667" font-size="9" text-anchor="end">4700</text>
+  <text x="53" y="341" fill="#ff9800" font-size="9" text-anchor="end">4690</text>
+  <text x="53" y="365" fill="#ff9800" font-size="9" text-anchor="end" opacity="0.6">4688</text>
+
+  <!-- ═══════════════════════════════════════════════════════════════════
+       RIGHT-SIDE PRICE LABELS (matching reference lines)
+  ════════════════════════════════════════════════════════════════════ -->
+  <!-- Peak body top -->
+  <text x="857" y="99"  fill="#556" font-size="9">4711 wick high</text>
+  <text x="857" y="118" fill="#ffd600" font-size="9" font-weight="bold">4709 body top  ←</text>
+  <!-- Prior body low -->
+  <text x="857" y="341" fill="#ff9800" font-size="9" font-weight="bold">4690 body bot  ←</text>
+  <text x="857" y="364" fill="#556" font-size="9">4688 wick low</text>
+
+  <!-- ═══════════════════════════════════════════════════════════════════
+       BAR LABELS
+  ════════════════════════════════════════════════════════════════════ -->
+
+  <!-- Bar 0: PRIOR BODY LOW -->
+  <line x1="88" y1="369" x2="88" y2="398" stroke="#ff9800" stroke-width="1" stroke-dasharray="2,2"/>
+  <text x="88" y="408" fill="#ff9800" font-size="9" text-anchor="middle">Prior</text>
+  <text x="88" y="419" fill="#ff9800" font-size="9" text-anchor="middle">Body Low</text>
+
+  <!-- Bar 5: PEAK -->
+  <line x1="353" y1="85" x2="353" y2="58" stroke="#ffd600" stroke-width="1" stroke-dasharray="2,2"/>
+  <text x="353" y="52" fill="#ffd600" font-size="9" text-anchor="middle" font-weight="bold">PEAK</text>
+  <text x="353" y="41" fill="#ffd600" font-size="8" text-anchor="middle">body=4709</text>
+
+  <!-- Bar 8: MINOR LOW -->
+  <line x1="512" y1="298" x2="512" y2="398" stroke="#ce93d8" stroke-width="1" stroke-dasharray="2,2"/>
+  <text x="512" y="408" fill="#ce93d8" font-size="9" text-anchor="middle">Minor</text>
+  <text x="512" y="419" fill="#ce93d8" font-size="9" text-anchor="middle">Low</text>
+
+  <!-- Bar 10: PB PEAK -->
+  <line x1="618" y1="167" x2="618" y2="58" stroke="#00bcd4" stroke-width="1" stroke-dasharray="2,2"/>
+  <text x="618" y="52" fill="#00bcd4" font-size="9" text-anchor="middle">PB Peak</text>
+
+  <!-- ═══════════════════════════════════════════════════════════════════
+       BODY vs WICK CALLOUT BOX (top-right of chart)
+  ════════════════════════════════════════════════════════════════════ -->
+  <rect x="595" y="48" width="155" height="128" fill="#080d14" rx="3" stroke="#1e2535" stroke-width="1"/>
+  <text x="672" y="62" fill="#778" font-size="9" text-anchor="middle" font-style="italic">single candle anatomy</text>
+
+  <!-- Sample candle: wick x=645, body x=635..655 -->
+  <line x1="645" y1="72" x2="645" y2="162" stroke="#667" stroke-width="1.5"/>
+  <rect x="634" y="100" width="22" height="42" fill="#26a69a" rx="1"/><!-- body (bullish) -->
+
+  <!-- Wick annotations -->
+  <text x="670" y="76"  fill="#445" font-size="8">High</text>
+  <text x="670" y="86"  fill="#445" font-size="8">(wick — ignored)</text>
+  <line x1="660" y1="74" x2="645" y2="74" stroke="#445" stroke-width="0.8"/>
+
+  <text x="670" y="107" fill="#ffd600" font-size="8" font-weight="bold">Close / Open</text>
+  <line x1="660" y1="103" x2="656" y2="103" stroke="#ffd600" stroke-width="1"/>
+  <text x="670" y="137" fill="#ff9800" font-size="8" font-weight="bold">Open / Close</text>
+  <line x1="660" y1="141" x2="656" y2="141" stroke="#ff9800" stroke-width="1"/>
+
+  <text x="670" y="160" fill="#445" font-size="8">Low</text>
+  <text x="670" y="170" fill="#445" font-size="8">(wick — ignored)</text>
+  <line x1="660" y1="163" x2="645" y2="163" stroke="#445" stroke-width="0.8"/>
+
+  <!-- Body brace -->
+  <rect x="618" y="99" width="14" height="44" fill="none" stroke="#26a69a" stroke-width="1" rx="1"/>
+  <text x="610" y="117" fill="#26a69a" font-size="7" text-anchor="end">BODY</text>
+  <text x="610" y="127" fill="#26a69a" font-size="7" text-anchor="end">↑ used</text>
+  <text x="610" y="137" fill="#26a69a" font-size="7" text-anchor="end">for X%</text>
+
+  <!-- ═══════════════════════════════════════════════════════════════════
+       LOOKBACK WINDOW BRACKET
+  ════════════════════════════════════════════════════════════════════ -->
+  <line x1="77" y1="430" x2="682" y2="430" stroke="#2a3040" stroke-width="1"/>
+  <line x1="77" y1="425" x2="77"  y2="435" stroke="#2a3040" stroke-width="1"/>
+  <line x1="682" y1="425" x2="682" y2="435" stroke="#2a3040" stroke-width="1"/>
+  <text x="379" y="443" fill="#3a4555" font-size="9" text-anchor="middle">
+    CANDLE_COUNT lookback (20 bars) — prior_body_low scans ALL bars ≤ peak_idx
+  </text>
+
+  <!-- Arrow pointing left from "bar 0" -->
+  <text x="134" y="443" fill="#ff9800" font-size="9" text-anchor="middle">← searches here</text>
+
+  <!-- ═══════════════════════════════════════════════════════════════════
+       FORMULA BOX
+  ════════════════════════════════════════════════════════════════════ -->
+  <rect x="58" y="455" width="695" height="52" fill="#080d14" rx="3" stroke="#1e2535" stroke-width="1"/>
+
+  <text x="76" y="470" fill="#7986cb" font-size="10" font-weight="bold">X% formula (body-to-body):</text>
+
+  <text x="76" y="484" font-size="10">
+    <tspan fill="#ffd600" font-weight="bold">peak_body</tspan>
+    <tspan fill="#556"> = max(open[5], close[5]) = 4709    </tspan>
+    <tspan fill="#ff9800" font-weight="bold">prior_body_low</tspan>
+    <tspan fill="#556"> = min( min(opens[0..5]), min(closes[0..5]) ) = 4690</tspan>
+  </text>
+  <text x="76" y="499" font-size="10">
+    <tspan fill="#4caf50" font-weight="bold">x_move_pct</tspan>
+    <tspan fill="#556"> = (4709 − 4690) / 4690 × 100 = </tspan>
+    <tspan fill="#4caf50" font-weight="bold">0.40%</tspan>
+    <tspan fill="#556">   ✓ passes BIG_X_MOVE_PCT = 0.30% threshold</tspan>
+  </text>
+
+</svg>

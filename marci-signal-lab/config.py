@@ -59,6 +59,9 @@ class LabConfig:
     # ── Entry zone candle limit ──────────────────────────────────────────────
     max_zone_candles: int = 3    # max candles allowed in minor↔pb zone
 
+    # ── Structure timing gates ────────────────────────────────────────────────
+    max_structure_bars: int = 5  # minor must form within N bars of peak; pb within N bars of minor
+
     # ── Indicator periods ─────────────────────────────────────────────────────
     adx_period:    int = 14
     rsi_period:    int = 14

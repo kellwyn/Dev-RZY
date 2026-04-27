@@ -137,6 +137,9 @@ cfg = StrategyConfig(
     # Entry zone candle limit
     max_zone_candles = _int("MAX_ZONE_CANDLES", 3),
 
+    # Structure timing gates
+    max_structure_bars = _int("MAX_STRUCTURE_BARS", 5),
+
     # Trade Settings
     magic    = _int("MAGIC_NUMBER", 20260412),
     slippage = _int("SLIPPAGE",     20),
@@ -149,7 +152,10 @@ _alerted: set = set()
 
 
 def _alert_key(setup) -> str:
-    return f"{setup.symbol}|{setup.timeframe}|{setup.direction}|{setup.entry:.5f}"
+    # Key on peak_px so the same structure is executed at most once.
+    # When find_setup returns None (structure expired), _alerted is cleared
+    # and a fresh X% evaluation begins for the next structure.
+    return f"{setup.symbol}|{setup.direction}|{setup.peak_px:.5f}"
 
 
 # ── Main scan loop ────────────────────────────────────────────────────────────
