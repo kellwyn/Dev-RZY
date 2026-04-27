@@ -77,7 +77,8 @@ input double InpBigXMovePct       = 0.3;    // X% — impulse move size that def
                                             //   Forex: 1-2%  |  Indices: 2-4%  |  Crypto: 5%+
 input double InpYMaxPct           = 600.0;  // Y% — max distance (minor pt → peak) as % of X move
                                             //   Hard cap at runtime: 90%. Set high to effectively disable.
-input double InpTPPips            = 150.0;  // Take Profit in pips from entry (minor low/high)
+input double InpTPPips            = 0.0;    // TP pips from entry — when > 0 overrides InpTPMultiplier
+input double InpTPMultiplier      = 0.5;    // TP = this% × (midpoint → minor point distance) — used when InpTPPips = 0
 input double InpSLPips            = 0.0;    // Stop Loss pips from entry (0 = pullback ±2 pip default)
 
 input group "=== Pullback Strength Gates ==="
@@ -310,7 +311,14 @@ void RunStrategy()
             {
                 // Entry exactly at minor low (limit order)
                 double entryPx = minorPx;
-                double tpPx    = entryPx - InpTPPips * pipVal;
+                double tpPx;
+                if(InpTPPips > 0.0)
+                    tpPx = entryPx - InpTPPips * pipVal;
+                else
+                {
+                    double midpoint = (peakPx + minorPx) / 2.0;
+                    tpPx = entryPx - (midpoint - minorPx) * (InpTPMultiplier / 100.0);
+                }
                 double slPx    = (InpSLPips > 0.0) ? entryPx + InpSLPips * pipVal
                                                     : effectivePbPx + pipVal * 2.0;
 
@@ -385,7 +393,14 @@ void RunStrategy()
 
             // Entry exactly at minor high (limit order)
             double entryPx = minorPx;
-            double tpPx    = entryPx + InpTPPips * pipVal;
+            double tpPx;
+            if(InpTPPips > 0.0)
+                tpPx = entryPx + InpTPPips * pipVal;
+            else
+            {
+                double midpoint = (troughPx + minorPx) / 2.0;
+                tpPx = entryPx + (minorPx - midpoint) * (InpTPMultiplier / 100.0);
+            }
             double slPx    = (InpSLPips > 0.0) ? entryPx - InpSLPips * pipVal
                                                 : effectivePbPx - pipVal * 2.0;
 
