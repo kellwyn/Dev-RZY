@@ -29,7 +29,7 @@ if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 from bot.connection import connect, disconnect
-from bot.strategy   import StrategyConfig, find_setup, print_dashboard
+from bot.strategy   import StrategyConfig, find_setup, print_dashboard, setup_logging
 from bot.trader     import execute_setup
 
 load_dotenv()
@@ -146,6 +146,9 @@ cfg = StrategyConfig(
 )
 
 SCAN_INTERVAL = _int("SCAN_INTERVAL", 60)   # seconds between scans
+LOG_LEVEL     = _str("LOG_LEVEL",     "INFO")  # DEBUG for full rule trace
+
+setup_logging(LOG_LEVEL)
 
 # Tracks setups already shown to avoid re-prompting on the same signal
 _alerted: set = set()

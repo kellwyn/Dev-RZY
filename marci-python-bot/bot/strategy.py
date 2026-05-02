@@ -23,6 +23,7 @@ NOTE on array direction:
 
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
@@ -33,6 +34,28 @@ import pandas as pd
 import MetaTrader5 as mt5
 
 from .signals import TradeSetup
+
+
+# ── Logger ────────────────────────────────────────────────────────────────────
+
+_log = logging.getLogger("marci")
+
+
+def setup_logging(level: str = "INFO") -> None:
+    """
+    Configure console logging for the Marci bot.
+    Call once from main.py before the scan loop starts.
+    """
+    lvl = getattr(logging, level.upper(), logging.INFO)
+    handler = logging.StreamHandler()
+    handler.setFormatter(logging.Formatter(
+        fmt="  %(asctime)s  %(message)s",
+        datefmt="%H:%M:%S",
+    ))
+    logger = logging.getLogger("marci")
+    logger.setLevel(lvl)
+    if not logger.handlers:
+        logger.addHandler(handler)
 
 
 # ── Strategy configuration ────────────────────────────────────────────────────
@@ -84,10 +107,10 @@ class StrategyConfig:
     key_level_pips:   float = 10.0
 
     # Entry zone candle limit (Rule 5)
-    max_zone_candles: int = 3              # max candles allowed to close inside minor↔pb zone
+    max_zone_candles: int = 3
 
     # Structure timing gates (Rules 1-4)
-    max_structure_bars: int = 5            # minor must form within N bars of peak; pb within N bars of minor
+    max_structure_bars: int = 5
 
     # Trade settings
     magic:    int = 20260412
@@ -95,7 +118,6 @@ class StrategyConfig:
 
 
 # ── Module-level cooldown state ───────────────────────────────────────────────
-# Mirrors the MQL5 globals g_lastTPExitTime / g_lastTPExitPrice.
 
 _last_tp_exit_time:  Optional[datetime] = None
 _last_tp_exit_price: float              = 0.0
@@ -104,7 +126,6 @@ _last_tp_exit_price: float              = 0.0
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _pip_size(symbol: str) -> float:
-    """Return the pip size for a symbol (handles 3/5-digit and 2/4-digit)."""
     info = mt5.symbol_info(symbol)
     if info is None:
         return 0.0001
@@ -112,19 +133,15 @@ def _pip_size(symbol: str) -> float:
 
 
 def _in_session_window(h: int, start: int, end: int) -> bool:
-    """True if hour h is inside [start, end), handling midnight spans."""
     if start > end:
         return h >= start or h < end
     return start <= h < end
 
 
 def get_current_session(cfg: StrategyConfig) -> str:
-    """Return the name of the active ICT session(s), or 'ALL' if filter off."""
     if not cfg.use_session:
         return "ALL"
-
     h = (datetime.now(timezone.utc).hour + cfg.gmt_offset) % 24
-
     parts = []
     if _in_session_window(h, cfg.asian_start_h, cfg.asian_end_h):
         parts.append("PRE-ASIAN" if h == cfg.asian_start_h else "ASIAN")
@@ -132,12 +149,10 @@ def get_current_session(cfg: StrategyConfig) -> str:
         parts.append("PRE-LONDON" if h == cfg.london_start_h else "LONDON")
     if _in_session_window(h, cfg.ny_start_h, cfg.ny_end_h):
         parts.append("PRE-NY" if h == cfg.ny_start_h else "NY AM")
-
     return " / ".join(parts) if parts else ""
 
 
 def is_in_trading_session(cfg: StrategyConfig) -> bool:
-    """Rule 8: True if the current time falls in an active ICT session."""
     if not cfg.use_session:
         return True
     return bool(get_current_session(cfg))
@@ -146,23 +161,15 @@ def is_in_trading_session(cfg: StrategyConfig) -> bool:
 # ── Rule 9: Post-TP cooldown ──────────────────────────────────────────────────
 
 def check_and_update_tp_state(cfg: StrategyConfig):
-    """
-    Scan recent deal history for TP exits belonging to this EA.
-    Updates module-level _last_tp_exit_time / _last_tp_exit_price.
-    """
     global _last_tp_exit_time, _last_tp_exit_price
-
     if not cfg.use_post_tp_cooldown:
         return
-
     now = datetime.now(timezone.utc)
     from_dt = now - timedelta(minutes=cfg.post_tp_cooldown_mins + 5)
-
     deals = mt5.history_deals_get(from_dt, now)
     if deals is None:
         return
-
-    for d in reversed(deals):               # newest first
+    for d in reversed(deals):
         if (d.magic == cfg.magic and
                 d.reason == mt5.DEAL_REASON_TP and
                 d.entry  == mt5.DEAL_ENTRY_OUT):
@@ -174,19 +181,13 @@ def check_and_update_tp_state(cfg: StrategyConfig):
 
 
 def is_post_tp_cooldown(last_close: float, cfg: StrategyConfig) -> bool:
-    """
-    Rule 9: block a new entry if a TP exit occurred within the cooldown window
-    AND price has moved >= big_move_pct% since that exit.
-    """
     if not cfg.use_post_tp_cooldown:
         return False
     if _last_tp_exit_time is None or _last_tp_exit_price == 0.0:
         return False
-
     elapsed = (datetime.now(timezone.utc) - _last_tp_exit_time).total_seconds()
     if elapsed > cfg.post_tp_cooldown_mins * 60:
         return False
-
     move = abs(last_close - _last_tp_exit_price) / _last_tp_exit_price * 100.0
     return move >= cfg.big_move_pct
 
@@ -195,17 +196,11 @@ def is_post_tp_cooldown(last_close: float, cfg: StrategyConfig) -> bool:
 
 def is_big_move_cooldown(direction: str, opens: np.ndarray,
                           closes: np.ndarray, cfg: StrategyConfig) -> bool:
-    """
-    Block entries if any bar in the last N bars moved >= big_move_pct% on a
-    close-vs-open basis in the trade direction (move already exhausted).
-    """
     if not cfg.use_big_move_cooldown:
         return False
-
     threshold = cfg.big_move_pct / 100.0
     lookback  = min(cfg.big_move_cooldown_bars, len(opens))
-
-    for i in range(1, lookback + 1):        # scan from most recent bar back
+    for i in range(1, lookback + 1):
         o, c = opens[-i], closes[-i]
         if o == 0:
             continue
@@ -221,19 +216,15 @@ def is_big_move_cooldown(direction: str, opens: np.ndarray,
 
 def is_near_key_level(symbol: str, price: float,
                        direction: str, cfg: StrategyConfig) -> bool:
-    """Check ATH/ATL (520 W1), Monthly H/L (12), Weekly H/L (52)."""
     if not cfg.use_key_level:
         return False
-
     pip  = _pip_size(symbol)
     buf  = cfg.key_level_pips * pip
-
     checks = [
         (mt5.TIMEFRAME_W1,  52),
         (mt5.TIMEFRAME_MN1, 12),
         (mt5.TIMEFRAME_W1,  520),
     ]
-
     for tf, count in checks:
         rates = mt5.copy_rates_from_pos(symbol, tf, 0, count)
         if rates is None or len(rates) == 0:
@@ -246,49 +237,38 @@ def is_near_key_level(symbol: str, price: float,
             return True
         if direction == "LONG"  and abs(price - lvl_h) <= buf:
             return True
-
     return False
 
 
 # ── Rule 1-4: Setup detection ─────────────────────────────────────────────────
-# Python arrays are chronological (index 0 = oldest, -1 = most recent),
-# the OPPOSITE of MQL5 AsSeries.  The temporal sequence for SHORT is:
 #
-#  older ──────────────────────────────────── newer
-#  [..] → PEAK (peak_idx) → MINOR LOW (minor_idx) → PB PEAK (pb_idx) → current
+# Python arrays are chronological (index 0 = oldest, -1 = most recent).
+# For SHORT: peak_idx < minor_idx < pb_idx  (opposite of MQL5 AsSeries)
 #
-# So: peak_idx < minor_idx < pb_idx  (unlike MQL5 where peakBar > minorBar > pbBar)
+# verbose=True emits a log line for every rule pass and the first failure
+# encountered on the most recently seen R1 candidate.
 
 
 def _find_short_setup(
     highs: np.ndarray, lows: np.ndarray,
     opens: np.ndarray, closes: np.ndarray,
     cfg: StrategyConfig, pip: float,
+    *,
+    verbose: bool = False,
 ) -> Optional[dict]:
-    """
-    Scan for a SHORT structure, trying candidate peaks from most recent to oldest.
-
-    X% is measured body-to-body (top of peak candle body → bottom of prior candle bodies)
-    rather than wick-to-wick, filtering out spike noise.
-
-    For each peak that meets the X% gate:
-      - Minor low must form within max_structure_bars bars of the peak.
-      - Pullback peak must form within max_structure_bars bars of the minor low.
-    If either timing constraint fails, that peak is discarded and the search
-    restarts from step 1 with the next candidate (re-evaluate from scratch).
-    """
-    n    = len(highs)
+    n     = len(highs)
     if n < 6:
         return None
     y_max = min(cfg.y_max_pct, 90.0)
     max_s = cfg.max_structure_bars
 
+    _r1_logged = False   # log only the first R1 candidate per scan
+
     for peak_idx in range(n - 1, -1, -1):
         if peak_idx < 1:
             continue
-        peak_px = float(highs[peak_idx])  # wick high — used for structural comparisons
 
-        # Step 1 — X% UP move (body-to-body)
+        # ── Rule 1: X% UP move (body-to-body) ────────────────────────
         peak_body      = float(max(opens[peak_idx], closes[peak_idx]))
         prior_body_low = float(min(
             np.min(opens[:peak_idx]),
@@ -303,50 +283,116 @@ def _find_short_setup(
         if x_move_pct < cfg.big_x_move_pct:
             continue
 
-        # Step 2 — MINOR LOW: within max_s bars after peak
+        peak_px = float(highs[peak_idx])
+
+        if verbose and not _r1_logged:
+            _log.info(
+                "[SHORT] R1 ✓  X%% UP %.2f%%  |  peak body=%.2f  prior base=%.2f  "
+                "(bar -%d)",
+                x_move_pct, peak_body, prior_body_low, n - 1 - peak_idx,
+            )
+            _r1_logged = True
+
+        # ── Rule 2: MINOR LOW within max_s bars after peak ────────────
         minor_end = min(peak_idx + 1 + max_s, n)
         if minor_end <= peak_idx + 1:
+            if verbose and _r1_logged:
+                _log.warning(
+                    "[SHORT] R2 ✗  no room for minor low after peak (need %d bars)", max_s
+                )
             continue
         minor_local = int(np.argmin(lows[peak_idx + 1 : minor_end]))
         minor_idx   = peak_idx + 1 + minor_local
         minor_px    = float(lows[minor_idx])
 
-        # Step 3 — PULLBACK PEAK: within max_s bars after minor
+        if verbose and _r1_logged:
+            _log.info(
+                "[SHORT] R2 ✓  Minor LOW=%.2f  |  %d bar(s) after peak",
+                minor_px, minor_idx - peak_idx,
+            )
+
+        # ── Rule 3: PULLBACK PEAK within max_s bars after minor ───────
         pb_end = min(minor_idx + 1 + max_s, n)
         if pb_end <= minor_idx + 1:
+            if verbose and _r1_logged:
+                _log.warning(
+                    "[SHORT] R3 ✗  no room for pullback after minor (need %d bars)", max_s
+                )
             continue
-        pb_seg   = highs[minor_idx + 1 : pb_end]
+        pb_seg = highs[minor_idx + 1 : pb_end]
         if len(pb_seg) == 0:
+            if verbose and _r1_logged:
+                _log.warning("[SHORT] R3 ✗  empty pullback window")
             continue
         pb_local = int(np.argmax(pb_seg))
         pb_idx   = minor_idx + 1 + pb_local
         pb_px    = float(highs[pb_idx])
 
+        if verbose and _r1_logged:
+            _log.info(
+                "[SHORT] R3 ✓  Pullback HIGH=%.2f  |  %d bar(s) after minor",
+                pb_px, pb_idx - minor_idx,
+            )
+
+        # ── Rule 4: structural validity ───────────────────────────────
         if pb_px >= peak_px:
+            if verbose and _r1_logged:
+                _log.warning(
+                    "[SHORT] R4 ✗  pb %.2f >= peak %.2f — not a lower high",
+                    pb_px, peak_px,
+                )
             continue
         if minor_px >= pb_px:
+            if verbose and _r1_logged:
+                _log.warning(
+                    "[SHORT] R4 ✗  minor %.2f >= pb %.2f — minor not below pullback",
+                    minor_px, pb_px,
+                )
             continue
         if n - pb_idx - 1 < 2:
+            if verbose and _r1_logged:
+                _log.warning("[SHORT] R4 ✗  fewer than 2 confirmation bars after pullback")
             continue
 
-        # Step 4 — Y% gate
         minor_dist = peak_px - minor_px
         if minor_dist <= 0 or minor_dist > (y_max / 100.0) * x_move_px:
+            if verbose and _r1_logged:
+                _log.warning(
+                    "[SHORT] R4 ✗  Y%% gate — minor dist %.2f exceeds %.0f%% of X move %.2f",
+                    minor_dist, y_max, x_move_px,
+                )
             continue
 
-        # Step 5 — Pullback depth
         pb_depth = (pb_px - minor_px) / (peak_px - minor_px) * 100.0
         if not (cfg.min_pullback_pct <= pb_depth <= cfg.max_pullback_pct):
+            if verbose and _r1_logged:
+                _log.warning(
+                    "[SHORT] R4 ✗  pb depth %.1f%% outside [%.0f%%–%.0f%%]",
+                    pb_depth, cfg.min_pullback_pct, cfg.max_pullback_pct,
+                )
             continue
 
-        # Step 6 — Min impulse size
         if pip > 0 and (minor_dist / pip) < cfg.min_impulse_pips:
+            if verbose and _r1_logged:
+                _log.warning(
+                    "[SHORT] R4 ✗  impulse %.1f pips < min %.0f pips",
+                    minor_dist / pip, cfg.min_impulse_pips,
+                )
             continue
 
-        return dict(peak_idx=peak_idx, peak_px=peak_px,
-                    minor_idx=minor_idx, minor_px=minor_px,
-                    pb_idx=pb_idx, pb_px=pb_px,
-                    x_move_pct=x_move_pct)
+        if verbose:
+            _log.info(
+                "[SHORT] R4 ✓  depth=%.1f%%  impulse=%.1f pips  |  "
+                "peak=%.2f  minor=%.2f  pb=%.2f",
+                pb_depth, minor_dist / pip, peak_px, minor_px, pb_px,
+            )
+
+        return dict(
+            peak_idx=peak_idx, peak_px=peak_px,
+            minor_idx=minor_idx, minor_px=minor_px,
+            pb_idx=pb_idx, pb_px=pb_px,
+            x_move_pct=x_move_pct,
+        )
 
     return None
 
@@ -355,25 +401,22 @@ def _find_long_setup(
     highs: np.ndarray, lows: np.ndarray,
     opens: np.ndarray, closes: np.ndarray,
     cfg: StrategyConfig, pip: float,
+    *,
+    verbose: bool = False,
 ) -> Optional[dict]:
-    """
-    Mirror of _find_short_setup for LONG (TROUGH → MINOR HIGH → PB TROUGH).
-    X% is measured body-to-body (bottom of trough candle body → top of prior bodies).
-    Timing constraint: minor high within max_structure_bars bars of trough;
-    pullback trough within max_structure_bars bars of minor high.
-    """
-    n    = len(highs)
+    n     = len(highs)
     if n < 6:
         return None
     y_max = min(cfg.y_max_pct, 90.0)
     max_s = cfg.max_structure_bars
 
+    _r1_logged = False
+
     for trough_idx in range(n - 1, -1, -1):
         if trough_idx < 1:
             continue
-        trough_px = float(lows[trough_idx])  # wick low — used for structural comparisons
 
-        # Step 1 — X% DOWN move (body-to-body)
+        # ── Rule 1: X% DOWN move (body-to-body) ──────────────────────
         trough_body     = float(min(opens[trough_idx], closes[trough_idx]))
         prior_body_high = float(max(
             np.max(opens[:trough_idx]),
@@ -388,70 +431,121 @@ def _find_long_setup(
         if x_move_pct < cfg.big_x_move_pct:
             continue
 
-        # Step 2 — MINOR HIGH: within max_s bars after trough
+        trough_px = float(lows[trough_idx])
+
+        if verbose and not _r1_logged:
+            _log.info(
+                "[LONG]  R1 ✓  X%% DOWN %.2f%%  |  trough body=%.2f  prior base=%.2f  "
+                "(bar -%d)",
+                x_move_pct, trough_body, prior_body_high, n - 1 - trough_idx,
+            )
+            _r1_logged = True
+
+        # ── Rule 2: MINOR HIGH within max_s bars after trough ─────────
         minor_end = min(trough_idx + 1 + max_s, n)
         if minor_end <= trough_idx + 1:
+            if verbose and _r1_logged:
+                _log.warning(
+                    "[LONG]  R2 ✗  no room for minor high after trough (need %d bars)", max_s
+                )
             continue
         minor_local = int(np.argmax(highs[trough_idx + 1 : minor_end]))
         minor_idx   = trough_idx + 1 + minor_local
         minor_px    = float(highs[minor_idx])
 
-        # Step 3 — PULLBACK TROUGH: within max_s bars after minor
+        if verbose and _r1_logged:
+            _log.info(
+                "[LONG]  R2 ✓  Minor HIGH=%.2f  |  %d bar(s) after trough",
+                minor_px, minor_idx - trough_idx,
+            )
+
+        # ── Rule 3: PULLBACK TROUGH within max_s bars after minor ─────
         pb_end = min(minor_idx + 1 + max_s, n)
         if pb_end <= minor_idx + 1:
+            if verbose and _r1_logged:
+                _log.warning(
+                    "[LONG]  R3 ✗  no room for pullback after minor (need %d bars)", max_s
+                )
             continue
-        pb_seg   = lows[minor_idx + 1 : pb_end]
+        pb_seg = lows[minor_idx + 1 : pb_end]
         if len(pb_seg) == 0:
+            if verbose and _r1_logged:
+                _log.warning("[LONG]  R3 ✗  empty pullback window")
             continue
         pb_local = int(np.argmin(pb_seg))
         pb_idx   = minor_idx + 1 + pb_local
         pb_px    = float(lows[pb_idx])
 
+        if verbose and _r1_logged:
+            _log.info(
+                "[LONG]  R3 ✓  Pullback LOW=%.2f  |  %d bar(s) after minor",
+                pb_px, pb_idx - minor_idx,
+            )
+
+        # ── Rule 4: structural validity ───────────────────────────────
         if pb_px <= trough_px:
+            if verbose and _r1_logged:
+                _log.warning(
+                    "[LONG]  R4 ✗  pb %.2f <= trough %.2f — not a higher low",
+                    pb_px, trough_px,
+                )
             continue
         if minor_px <= pb_px:
+            if verbose and _r1_logged:
+                _log.warning(
+                    "[LONG]  R4 ✗  minor %.2f <= pb %.2f — minor not above pullback",
+                    minor_px, pb_px,
+                )
             continue
         if n - pb_idx - 1 < 2:
+            if verbose and _r1_logged:
+                _log.warning("[LONG]  R4 ✗  fewer than 2 confirmation bars after pullback")
             continue
 
-        # Step 4 — Y% gate
         minor_dist = minor_px - trough_px
         if minor_dist <= 0 or minor_dist > (y_max / 100.0) * x_move_px:
+            if verbose and _r1_logged:
+                _log.warning(
+                    "[LONG]  R4 ✗  Y%% gate — minor dist %.2f exceeds %.0f%% of X move %.2f",
+                    minor_dist, y_max, x_move_px,
+                )
             continue
 
-        # Step 5 — Pullback depth
         pb_depth = (minor_px - pb_px) / (minor_px - trough_px) * 100.0
         if not (cfg.min_pullback_pct <= pb_depth <= cfg.max_pullback_pct):
+            if verbose and _r1_logged:
+                _log.warning(
+                    "[LONG]  R4 ✗  pb depth %.1f%% outside [%.0f%%–%.0f%%]",
+                    pb_depth, cfg.min_pullback_pct, cfg.max_pullback_pct,
+                )
             continue
 
-        # Step 6 — Min impulse size
         if pip > 0 and (minor_dist / pip) < cfg.min_impulse_pips:
+            if verbose and _r1_logged:
+                _log.warning(
+                    "[LONG]  R4 ✗  impulse %.1f pips < min %.0f pips",
+                    minor_dist / pip, cfg.min_impulse_pips,
+                )
             continue
 
-        return dict(trough_idx=trough_idx, trough_px=trough_px,
-                    minor_idx=minor_idx, minor_px=minor_px,
-                    pb_idx=pb_idx, pb_px=pb_px,
-                    x_move_pct=x_move_pct)
+        if verbose:
+            _log.info(
+                "[LONG]  R4 ✓  depth=%.1f%%  impulse=%.1f pips  |  "
+                "trough=%.2f  minor=%.2f  pb=%.2f",
+                pb_depth, minor_dist / pip, trough_px, minor_px, pb_px,
+            )
+
+        return dict(
+            trough_idx=trough_idx, trough_px=trough_px,
+            minor_idx=minor_idx, minor_px=minor_px,
+            pb_idx=pb_idx, pb_px=pb_px,
+            x_move_pct=x_move_pct,
+        )
 
     return None
 
 
 # ── Rule 5: Entry confirmation ────────────────────────────────────────────────
-#
-# Replaces the old 2-bar momentum check. Reviews every completed bar after the
-# pullback peak and applies three gates before checking the live price:
-#
-#   1. Close > pb_px  → new higher pullback peak.
-#        Recalculate depth against max_pullback_pct. If within limits, promote
-#        pb_px to the new bar's high. If beyond, invalidate.
-#   2. Close < minor_px → price closed below the exhaustion low. Invalidate.
-#   3. Otherwise          → zone candle (consolidating between minor and pb).
-#        Count against max_zone_candles; too many means the setup is stale.
-#
-# Live price check:
-#   - bid ≤ minor_px  → immediate entry (forming bar has reached the minor low;
-#                        do not wait for it to close).
-#   - minor_px < bid < pb_px → standard entry zone.
 
 def _confirm_short_entry(
     s: dict,
@@ -476,19 +570,19 @@ def _confirm_short_entry(
             new_depth = (h - minor_px) / (peak_px - minor_px) * 100.0 \
                         if (peak_px - minor_px) > 0 else 0.0
             if new_depth > cfg.max_pullback_pct:
-                return False, pb_px  # pullback too deep — structure invalid
-            pb_px = h                # promote to new pullback high
+                return False, pb_px
+            pb_px = h
         elif c < minor_px:
-            return False, pb_px      # closed below exhaustion low — structure broken
+            return False, pb_px
         else:
             zone_count += 1
             if zone_count > cfg.max_zone_candles:
-                return False, pb_px  # too many bars consolidating — setup stale
+                return False, pb_px
 
     if bid <= minor_px:
-        return True, pb_px           # immediate entry: bar declined to minor low
+        return True, pb_px
     if minor_px < bid < pb_px:
-        return True, pb_px           # standard entry zone
+        return True, pb_px
     return False, pb_px
 
 
@@ -516,16 +610,16 @@ def _confirm_long_entry(
                         if (minor_px - trough_px) > 0 else 0.0
             if new_depth > cfg.max_pullback_pct:
                 return False, pb_px
-            pb_px = l                # promote to new pullback low
+            pb_px = l
         elif c > minor_px:
-            return False, pb_px      # closed above minor high — structure broken
+            return False, pb_px
         else:
             zone_count += 1
             if zone_count > cfg.max_zone_candles:
                 return False, pb_px
 
     if ask >= minor_px:
-        return True, pb_px           # immediate entry: bar reached minor high
+        return True, pb_px
     if pb_px < ask < minor_px:
         return True, pb_px
     return False, pb_px
@@ -543,7 +637,6 @@ _TF_MAP = {
 
 
 def _fetch(symbol: str, tf_str: str, count: int) -> Optional[pd.DataFrame]:
-    """Fetch completed OHLC bars (skips forming bar via pos=1)."""
     tf = _TF_MAP.get(tf_str.upper())
     if tf is None:
         return None
@@ -560,11 +653,10 @@ def _fetch(symbol: str, tf_str: str, count: int) -> Optional[pd.DataFrame]:
 # ── Gap guard ─────────────────────────────────────────────────────────────────
 
 def _gap_guard(df: pd.DataFrame) -> bool:
-    """At daily opens only, block if the current bar opened outside the prior bar's range."""
     if len(df) < 2:
         return False
     if df["time"].iloc[-1].date() == df["time"].iloc[-2].date():
-        return True  # intraday bar — gap guard not applied
+        return True
     o0 = df["o"].iloc[-1]
     h1 = df["h"].iloc[-2]
     l1 = df["l"].iloc[-2]
@@ -576,6 +668,7 @@ def _gap_guard(df: pd.DataFrame) -> bool:
 def find_setup(cfg: StrategyConfig) -> Optional[TradeSetup]:
     """
     Fetch bars, run all pre-checks, attempt SHORT then LONG.
+    Logs every rule pass and the first failure encountered.
     Returns a TradeSetup if found, otherwise None.
     """
     df = _fetch(cfg.symbol, cfg.timeframe, cfg.candle_count)
@@ -589,15 +682,19 @@ def find_setup(cfg: StrategyConfig) -> Optional[TradeSetup]:
 
     # Pre-check 1: gap guard
     if not _gap_guard(df):
+        _log.warning("[GATE] Gap guard BLOCKED — daily open outside prior bar range")
         return None
 
     # Pre-check 2: ICT session filter (Rule 8)
     if not is_in_trading_session(cfg):
+        _log.warning("[GATE] Session filter BLOCKED — outside active ICT session (%s)",
+                     get_current_session(cfg) or "none")
         return None
 
     # Pre-check 3: post-TP cooldown (Rule 9)
     check_and_update_tp_state(cfg)
     if is_post_tp_cooldown(float(closes[-1]), cfg):
+        _log.warning("[GATE] Post-TP cooldown BLOCKED — waiting for cooldown to expire")
         return None
 
     pip     = _pip_size(cfg.symbol)
@@ -608,24 +705,33 @@ def find_setup(cfg: StrategyConfig) -> Optional[TradeSetup]:
         return None
 
     # ── Try SHORT ─────────────────────────────────────────────────────────────
-    s = _find_short_setup(highs, lows, opens, closes, cfg, pip)
+    s = _find_short_setup(highs, lows, opens, closes, cfg, pip, verbose=True)
     if s:
         enter, pb_px = _confirm_short_entry(s, highs, lows, closes, float(tick.bid), cfg)
         if enter:
+            _log.info(
+                "[SHORT] R5 ✓  Entry zone confirmed  |  bid=%.2f  zone: %.2f–%.2f",
+                tick.bid, s["minor_px"], pb_px,
+            )
             cur = float(tick.bid)
 
             # Rule 7 filters
             if is_big_move_cooldown("SHORT", opens, closes, cfg):
+                _log.warning("[SHORT] R7 ✗  Big move cooldown BLOCKED")
                 s = None
             elif is_near_key_level(cfg.symbol, cur, "SHORT", cfg):
+                _log.warning("[SHORT] R7 ✗  Key level filter BLOCKED — price within %.0f pips of key level",
+                             cfg.key_level_pips)
                 s = None
+            else:
+                _log.info("[SHORT] R7 ✓  All filters clear")
 
             if s:
                 midpoint     = (s["peak_px"] + s["minor_px"]) / 2.0
-                dist         = midpoint - s["minor_px"]           # > 0
+                dist         = midpoint - s["minor_px"]
                 tp_px        = s["minor_px"] - dist * (cfg.tp_multiplier / 100.0)
                 sl_opt1      = midpoint + pip * 2.0
-                sl_opt2      = pb_px    + pip * 2.0               # effective pb_px
+                sl_opt2      = pb_px    + pip * 2.0
                 sl_px        = min(sl_opt1, sl_opt2)
 
                 risk   = sl_px - cur
@@ -633,6 +739,12 @@ def find_setup(cfg: StrategyConfig) -> Optional[TradeSetup]:
                 rr     = round(reward / risk, 2) if (risk > 0 and reward > 0) else 0.0
 
                 if rr >= cfg.min_rr:
+                    lots = _calc_lots(cur, sl_px, cfg)
+                    _log.info(
+                        "[SHORT] ▶▶▶ SIGNAL  entry=%.2f  SL=%.2f  TP=%.2f  "
+                        "RR=1:%.2f  lots=%.2f  [%s]",
+                        cur, sl_px, tp_px, rr, lots, session,
+                    )
                     return TradeSetup(
                         symbol=cfg.symbol, timeframe=cfg.timeframe,
                         direction="SHORT",
@@ -648,25 +760,42 @@ def find_setup(cfg: StrategyConfig) -> Optional[TradeSetup]:
                             pb_px, midpoint,
                             s["x_move_pct"], session),
                     )
+                else:
+                    _log.warning("[SHORT] RR %.2f < min %.2f — skipping", rr, cfg.min_rr)
+        else:
+            _log.warning(
+                "[SHORT] R5 ✗  Entry zone rejected  |  bid=%.2f  "
+                "(minor=%.2f  eff_pb=%.2f)",
+                tick.bid, s["minor_px"], pb_px,
+            )
 
     # ── Try LONG ──────────────────────────────────────────────────────────────
-    lg = _find_long_setup(highs, lows, opens, closes, cfg, pip)
+    lg = _find_long_setup(highs, lows, opens, closes, cfg, pip, verbose=True)
     if lg:
         enter, pb_px = _confirm_long_entry(lg, highs, lows, closes, float(tick.ask), cfg)
         if enter:
+            _log.info(
+                "[LONG]  R5 ✓  Entry zone confirmed  |  ask=%.2f  zone: %.2f–%.2f",
+                tick.ask, pb_px, lg["minor_px"],
+            )
             cur = float(tick.ask)
 
             if is_big_move_cooldown("LONG", opens, closes, cfg):
+                _log.warning("[LONG]  R7 ✗  Big move cooldown BLOCKED")
                 lg = None
             elif is_near_key_level(cfg.symbol, cur, "LONG", cfg):
+                _log.warning("[LONG]  R7 ✗  Key level filter BLOCKED — price within %.0f pips of key level",
+                             cfg.key_level_pips)
                 lg = None
+            else:
+                _log.info("[LONG]  R7 ✓  All filters clear")
 
             if lg:
                 midpoint = (lg["trough_px"] + lg["minor_px"]) / 2.0
-                dist     = lg["minor_px"] - midpoint              # > 0
+                dist     = lg["minor_px"] - midpoint
                 tp_px    = lg["minor_px"] + dist * (cfg.tp_multiplier / 100.0)
                 sl_opt1  = midpoint - pip * 2.0
-                sl_opt2  = pb_px    - pip * 2.0                   # effective pb_px
+                sl_opt2  = pb_px    - pip * 2.0
                 sl_px    = max(sl_opt1, sl_opt2)
 
                 risk   = cur   - sl_px
@@ -674,6 +803,12 @@ def find_setup(cfg: StrategyConfig) -> Optional[TradeSetup]:
                 rr     = round(reward / risk, 2) if (risk > 0 and reward > 0) else 0.0
 
                 if rr >= cfg.min_rr:
+                    lots = _calc_lots(cur, sl_px, cfg)
+                    _log.info(
+                        "[LONG]  ▶▶▶ SIGNAL  entry=%.2f  SL=%.2f  TP=%.2f  "
+                        "RR=1:%.2f  lots=%.2f  [%s]",
+                        cur, sl_px, tp_px, rr, lots, session,
+                    )
                     return TradeSetup(
                         symbol=cfg.symbol, timeframe=cfg.timeframe,
                         direction="LONG",
@@ -689,8 +824,35 @@ def find_setup(cfg: StrategyConfig) -> Optional[TradeSetup]:
                             pb_px, midpoint,
                             lg["x_move_pct"], session),
                     )
+                else:
+                    _log.warning("[LONG]  RR %.2f < min %.2f — skipping", rr, cfg.min_rr)
+        else:
+            _log.warning(
+                "[LONG]  R5 ✗  Entry zone rejected  |  ask=%.2f  "
+                "(eff_pb=%.2f  minor=%.2f)",
+                tick.ask, pb_px, lg["minor_px"],
+            )
 
     return None
+
+
+# ── Lot sizing ────────────────────────────────────────────────────────────────
+
+def _calc_lots(entry: float, stop_loss: float, cfg: StrategyConfig) -> float:
+    info = mt5.symbol_info(cfg.symbol)
+    if info is None:
+        return info.volume_min if info else 0.01
+    balance  = mt5.account_info().balance
+    risk_amt = balance * cfg.risk_pct / 100.0
+    sl_dist  = abs(entry - stop_loss)
+    if sl_dist == 0 or info.trade_tick_size == 0 or info.trade_tick_value == 0:
+        return info.volume_min
+    lot = risk_amt / (sl_dist * (info.trade_tick_value / info.trade_tick_size))
+    max_lot  = min(info.volume_max, cfg.max_lots)
+    lot = max(info.volume_min, min(max_lot, lot))
+    if info.volume_step > 0:
+        lot = round(lot / info.volume_step) * info.volume_step
+    return lot
 
 
 # ── Human-readable setup notes ────────────────────────────────────────────────

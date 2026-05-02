@@ -8,6 +8,7 @@ Standard patterns for MetaTrader strategy projects. Reference these when scaffol
 |---|---|---|
 | `diagnostic-scan` | `/diagnostic-scan GOLD.f` | Filter-by-filter bot diagnostic |
 | `deploy-ea` | `/deploy-ea` | Copy .mq5 to MetaTrader Experts folder |
+| `us-news-calendar` | `/us-news-calendar 2025` or `/us-news-calendar 2024-2026` | Research NFP/FOMC/GDP/PPI dates, UTC-correct, output MQL5 datetime arrays |
 | `new-strategy` | `/new-strategy SwingBB` | Scaffold a new strategy repo |
 
 ## Subagents (`.claude/agents/`)
