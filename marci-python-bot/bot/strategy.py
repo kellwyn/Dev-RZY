@@ -665,13 +665,26 @@ def _gap_guard(df: pd.DataFrame) -> bool:
 
 # ── Core: detect one setup ────────────────────────────────────────────────────
 
-def find_setup(cfg: StrategyConfig) -> Optional[TradeSetup]:
+def find_setup(
+    cfg: StrategyConfig,
+    *,
+    bar_provider=None,   # Optional[Callable[[], pd.DataFrame]] — injected in replay
+    tick_provider=None,  # Optional[Callable[[], tick-like]]    — injected in replay
+) -> Optional[TradeSetup]:
     """
     Fetch bars, run all pre-checks, attempt SHORT then LONG.
     Logs every rule pass and the first failure encountered.
+
+    bar_provider / tick_provider: when supplied (replay mode), these callables
+    replace the two live MT5 calls (_fetch and symbol_info_tick).  When None
+    (default), live MT5 behaviour is used unchanged.
+
     Returns a TradeSetup if found, otherwise None.
     """
-    df = _fetch(cfg.symbol, cfg.timeframe, cfg.candle_count)
+    if bar_provider is not None:
+        df = bar_provider()
+    else:
+        df = _fetch(cfg.symbol, cfg.timeframe, cfg.candle_count)
     if df is None or len(df) < 6:
         return None
 
@@ -691,8 +704,9 @@ def find_setup(cfg: StrategyConfig) -> Optional[TradeSetup]:
                      get_current_session(cfg) or "none")
         return None
 
-    # Pre-check 3: post-TP cooldown (Rule 9)
-    check_and_update_tp_state(cfg)
+    # Pre-check 3: post-TP cooldown (Rule 9) — skipped in replay (no MT5 deal history)
+    if tick_provider is None:
+        check_and_update_tp_state(cfg)
     if is_post_tp_cooldown(float(closes[-1]), cfg):
         _log.warning("[GATE] Post-TP cooldown BLOCKED — waiting for cooldown to expire")
         return None
@@ -700,7 +714,10 @@ def find_setup(cfg: StrategyConfig) -> Optional[TradeSetup]:
     pip     = _pip_size(cfg.symbol)
     session = get_current_session(cfg)
 
-    tick = mt5.symbol_info_tick(cfg.symbol)
+    if tick_provider is not None:
+        tick = tick_provider()
+    else:
+        tick = mt5.symbol_info_tick(cfg.symbol)
     if tick is None:
         return None
 
