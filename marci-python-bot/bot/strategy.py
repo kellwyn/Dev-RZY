@@ -681,10 +681,14 @@ def find_setup(
 
     Returns a TradeSetup if found, otherwise None.
     """
-    if bar_provider is not None:
-        df = bar_provider()
-    else:
+    # live=True  → full R1-R7 logging in the terminal
+    # live=False → replay mode; ReplayEngine logs [TRADE] lines instead
+    _live = bar_provider is None
+
+    if _live:
         df = _fetch(cfg.symbol, cfg.timeframe, cfg.candle_count)
+    else:
+        df = bar_provider()
     if df is None or len(df) < 6:
         return None
 
@@ -695,52 +699,52 @@ def find_setup(
 
     # Pre-check 1: gap guard
     if not _gap_guard(df):
-        _log.warning("[GATE] Gap guard BLOCKED — daily open outside prior bar range")
+        if _live:
+            _log.warning("[GATE] Gap guard BLOCKED — daily open outside prior bar range")
         return None
 
     # Pre-check 2: ICT session filter (Rule 8)
     if not is_in_trading_session(cfg):
-        _log.warning("[GATE] Session filter BLOCKED — outside active ICT session (%s)",
-                     get_current_session(cfg) or "none")
+        if _live:
+            _log.warning("[GATE] Session filter BLOCKED — outside active ICT session (%s)",
+                         get_current_session(cfg) or "none")
         return None
 
     # Pre-check 3: post-TP cooldown (Rule 9) — skipped in replay (no MT5 deal history)
-    if tick_provider is None:
+    if _live:
         check_and_update_tp_state(cfg)
     if is_post_tp_cooldown(float(closes[-1]), cfg):
-        _log.warning("[GATE] Post-TP cooldown BLOCKED — waiting for cooldown to expire")
+        if _live:
+            _log.warning("[GATE] Post-TP cooldown BLOCKED — waiting for cooldown to expire")
         return None
 
     pip     = _pip_size(cfg.symbol)
     session = get_current_session(cfg)
 
-    if tick_provider is not None:
-        tick = tick_provider()
-    else:
-        tick = mt5.symbol_info_tick(cfg.symbol)
+    tick = tick_provider() if tick_provider is not None else mt5.symbol_info_tick(cfg.symbol)
     if tick is None:
         return None
 
     # ── Try SHORT ─────────────────────────────────────────────────────────────
-    s = _find_short_setup(highs, lows, opens, closes, cfg, pip, verbose=True)
+    s = _find_short_setup(highs, lows, opens, closes, cfg, pip, verbose=_live)
     if s:
         enter, pb_px = _confirm_short_entry(s, highs, lows, closes, float(tick.bid), cfg)
         if enter:
-            _log.info(
-                "[SHORT] R5 ✓  Entry zone confirmed  |  bid=%.2f  zone: %.2f–%.2f",
-                tick.bid, s["minor_px"], pb_px,
-            )
+            if _live:
+                _log.info("[SHORT] R5 ✓  Entry zone confirmed  |  bid=%.2f  zone: %.2f–%.2f",
+                          tick.bid, s["minor_px"], pb_px)
             cur = float(tick.bid)
 
-            # Rule 7 filters
             if is_big_move_cooldown("SHORT", opens, closes, cfg):
-                _log.warning("[SHORT] R7 ✗  Big move cooldown BLOCKED")
+                if _live:
+                    _log.warning("[SHORT] R7 ✗  Big move cooldown BLOCKED")
                 s = None
             elif is_near_key_level(cfg.symbol, cur, "SHORT", cfg):
-                _log.warning("[SHORT] R7 ✗  Key level filter BLOCKED — price within %.0f pips of key level",
-                             cfg.key_level_pips)
+                if _live:
+                    _log.warning("[SHORT] R7 ✗  Key level filter BLOCKED — within %.0f pips",
+                                 cfg.key_level_pips)
                 s = None
-            else:
+            elif _live:
                 _log.info("[SHORT] R7 ✓  All filters clear")
 
             if s:
@@ -757,11 +761,10 @@ def find_setup(
 
                 if rr >= cfg.min_rr:
                     lots = _calc_lots(cur, sl_px, cfg)
-                    _log.info(
-                        "[SHORT] ▶▶▶ SIGNAL  entry=%.2f  SL=%.2f  TP=%.2f  "
-                        "RR=1:%.2f  lots=%.2f  [%s]",
-                        cur, sl_px, tp_px, rr, lots, session,
-                    )
+                    if _live:
+                        _log.info("[SHORT] ▶▶▶ SIGNAL  entry=%.2f  SL=%.2f  TP=%.2f  "
+                                  "RR=1:%.2f  lots=%.2f  [%s]",
+                                  cur, sl_px, tp_px, rr, lots, session)
                     return TradeSetup(
                         symbol=cfg.symbol, timeframe=cfg.timeframe,
                         direction="SHORT",
@@ -774,37 +777,35 @@ def find_setup(
                         setup_notes=_build_notes(
                             "SHORT", cur, sl_px, tp_px, rr,
                             s["peak_px"], s["minor_px"],
-                            pb_px, midpoint,
-                            s["x_move_pct"], session),
+                            pb_px, midpoint, s["x_move_pct"], session),
                     )
-                else:
+                elif _live:
                     _log.warning("[SHORT] RR %.2f < min %.2f — skipping", rr, cfg.min_rr)
-        else:
-            _log.warning(
-                "[SHORT] R5 ✗  Entry zone rejected  |  bid=%.2f  "
-                "(minor=%.2f  eff_pb=%.2f)",
-                tick.bid, s["minor_px"], pb_px,
-            )
+        elif _live:
+            _log.warning("[SHORT] R5 ✗  Entry zone rejected  |  bid=%.2f  "
+                         "(minor=%.2f  eff_pb=%.2f)",
+                         tick.bid, s["minor_px"], pb_px)
 
     # ── Try LONG ──────────────────────────────────────────────────────────────
-    lg = _find_long_setup(highs, lows, opens, closes, cfg, pip, verbose=True)
+    lg = _find_long_setup(highs, lows, opens, closes, cfg, pip, verbose=_live)
     if lg:
         enter, pb_px = _confirm_long_entry(lg, highs, lows, closes, float(tick.ask), cfg)
         if enter:
-            _log.info(
-                "[LONG]  R5 ✓  Entry zone confirmed  |  ask=%.2f  zone: %.2f–%.2f",
-                tick.ask, pb_px, lg["minor_px"],
-            )
+            if _live:
+                _log.info("[LONG]  R5 ✓  Entry zone confirmed  |  ask=%.2f  zone: %.2f–%.2f",
+                          tick.ask, pb_px, lg["minor_px"])
             cur = float(tick.ask)
 
             if is_big_move_cooldown("LONG", opens, closes, cfg):
-                _log.warning("[LONG]  R7 ✗  Big move cooldown BLOCKED")
+                if _live:
+                    _log.warning("[LONG]  R7 ✗  Big move cooldown BLOCKED")
                 lg = None
             elif is_near_key_level(cfg.symbol, cur, "LONG", cfg):
-                _log.warning("[LONG]  R7 ✗  Key level filter BLOCKED — price within %.0f pips of key level",
-                             cfg.key_level_pips)
+                if _live:
+                    _log.warning("[LONG]  R7 ✗  Key level filter BLOCKED — within %.0f pips",
+                                 cfg.key_level_pips)
                 lg = None
-            else:
+            elif _live:
                 _log.info("[LONG]  R7 ✓  All filters clear")
 
             if lg:
@@ -821,11 +822,10 @@ def find_setup(
 
                 if rr >= cfg.min_rr:
                     lots = _calc_lots(cur, sl_px, cfg)
-                    _log.info(
-                        "[LONG]  ▶▶▶ SIGNAL  entry=%.2f  SL=%.2f  TP=%.2f  "
-                        "RR=1:%.2f  lots=%.2f  [%s]",
-                        cur, sl_px, tp_px, rr, lots, session,
-                    )
+                    if _live:
+                        _log.info("[LONG]  ▶▶▶ SIGNAL  entry=%.2f  SL=%.2f  TP=%.2f  "
+                                  "RR=1:%.2f  lots=%.2f  [%s]",
+                                  cur, sl_px, tp_px, rr, lots, session)
                     return TradeSetup(
                         symbol=cfg.symbol, timeframe=cfg.timeframe,
                         direction="LONG",
@@ -838,17 +838,14 @@ def find_setup(
                         setup_notes=_build_notes(
                             "LONG", cur, sl_px, tp_px, rr,
                             lg["trough_px"], lg["minor_px"],
-                            pb_px, midpoint,
-                            lg["x_move_pct"], session),
+                            pb_px, midpoint, lg["x_move_pct"], session),
                     )
-                else:
+                elif _live:
                     _log.warning("[LONG]  RR %.2f < min %.2f — skipping", rr, cfg.min_rr)
-        else:
-            _log.warning(
-                "[LONG]  R5 ✗  Entry zone rejected  |  ask=%.2f  "
-                "(eff_pb=%.2f  minor=%.2f)",
-                tick.ask, pb_px, lg["minor_px"],
-            )
+        elif _live:
+            _log.warning("[LONG]  R5 ✗  Entry zone rejected  |  ask=%.2f  "
+                         "(eff_pb=%.2f  minor=%.2f)",
+                         tick.ask, pb_px, lg["minor_px"])
 
     return None
 
