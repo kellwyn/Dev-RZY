@@ -344,10 +344,6 @@ def _find_short_setup(
                     f"[SHORT] R4 ✗  minor {minor_px:.2f} >= pb {pb_px:.2f} — minor not below pullback"
                 )
             continue
-        if n - pb_idx - 1 < 2:
-            if scan_log is not None and _r1_logged:
-                scan_log.append("[SHORT] R4 ✗  fewer than 2 confirmation bars after pullback")
-            continue
 
         minor_dist = peak_px - minor_px
         if minor_dist <= 0:
@@ -495,10 +491,6 @@ def _find_long_setup(
                 scan_log.append(
                     f"[LONG]  R4 ✗  minor {minor_px:.2f} <= pb {pb_px:.2f} — minor not above pullback"
                 )
-            continue
-        if n - pb_idx - 1 < 2:
-            if scan_log is not None and _r1_logged:
-                scan_log.append("[LONG]  R4 ✗  fewer than 2 confirmation bars after pullback")
             continue
 
         minor_dist = minor_px - trough_px

@@ -467,7 +467,7 @@ bool FindShortSetup(
     // AsSeries convention: index 0 = most recent, higher index = older.
     // "After peak" (chronologically) = smaller index than peak.
 
-    int minPeakIdx = maxStructBars * 2 + 2;  // need room for minor + pb + 2 confirmation bars
+    int minPeakIdx = maxStructBars * 2;  // need room for minor + pb windows
 
     for(int pk = minPeakIdx; pk < bars; pk++)
     {
@@ -495,16 +495,15 @@ bool FindShortSetup(
         double mnPx = lows[mnBar];
 
         //── Step 3: PULLBACK PEAK within maxStructBars bars after minor
-        int pbStart = MathMax(2, mnBar - maxStructBars);  // index >= 2 for confirmation
+        int pbStart = MathMax(0, mnBar - maxStructBars);
         int pbCount = mnBar - pbStart;
         if(pbCount < 1) continue;
         int pbBar_c = ArrayMaximum(highs, pbStart, pbCount);
         double pbPx_c = highs[pbBar_c];
 
         //── Structural validity ──────────────────────────────────────
-        if(pbPx_c >= pkPx)  continue;  // not a lower high
-        if(mnPx   >= pbPx_c) continue; // minor must be below pb
-        if(pbBar_c < 2)      continue; // need 2 confirmation bars
+        if(pbPx_c >= pkPx)   continue;  // not a lower high
+        if(mnPx   >= pbPx_c) continue;  // minor must be below pb
 
         //── Step 4: Y% gate (min and max) ───────────────────────────
         double mnDist = pkPx - mnPx;
@@ -562,7 +561,7 @@ bool FindLongSetup(
     // to oldest. Minor high must form within maxStructBars bars of trough;
     // pullback trough within maxStructBars bars of minor high.
 
-    int minTroughIdx = maxStructBars * 2 + 2;
+    int minTroughIdx = maxStructBars * 2;
 
     for(int tr = minTroughIdx; tr < bars; tr++)
     {
@@ -589,7 +588,7 @@ bool FindLongSetup(
         double mnPx = highs[mnBar];
 
         //── Step 3: PULLBACK TROUGH within maxStructBars bars after minor
-        int pbStart = MathMax(2, mnBar - maxStructBars);
+        int pbStart = MathMax(0, mnBar - maxStructBars);
         int pbCount = mnBar - pbStart;
         if(pbCount < 1) continue;
         int pbBar_c = ArrayMinimum(lows, pbStart, pbCount);
@@ -598,7 +597,6 @@ bool FindLongSetup(
         //── Structural validity ──────────────────────────────────────
         if(pbPx_c <= trPx)   continue;  // must be higher low
         if(mnPx   <= pbPx_c) continue;  // minor must be above pb
-        if(pbBar_c < 2)      continue;
 
         //── Step 4: Y% gate (min and max) ───────────────────────────
         double mnDist = mnPx - trPx;
