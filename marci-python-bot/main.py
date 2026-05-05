@@ -1,7 +1,7 @@
 """
-Marci Silfrain — Measured Move Trend Strategy  v1.02  (Python Bot)
+Marci Silfrain — Measured Move Trend Strategy  v2.01  (Python Bot)
 
-Mirrors MarciMeasuredMove_v1.02.mq5.
+Mirrors MarciMeasuredMove_v2.01.mq5.
 Default parameters loaded from v102_settings_xauone.set (XAUUSD profile).
 
 Usage:
@@ -36,7 +36,7 @@ load_dotenv()
 
 # ── CLI arguments ─────────────────────────────────────────────────────────────
 
-_parser = argparse.ArgumentParser(description="Marci Measured Move Bot v1.02")
+_parser = argparse.ArgumentParser(description="Marci Measured Move Bot v2.01")
 _parser.add_argument("--profile", metavar="NAME",
                      help="Broker profile name defined in .env (e.g. metaquotes, blackbull-spot)")
 _parser.add_argument("--symbol",  metavar="SYM",
@@ -102,8 +102,9 @@ cfg = StrategyConfig(
 
     # Strategy Parameters
     candle_count   = _int("CANDLE_COUNT",     20),
-    big_x_move_pct = _float("BIG_X_MOVE_PCT", 0.5),
-    y_max_pct      = _float("Y_MAX_PCT",      600.0),   # capped to 90 at runtime
+    big_x_move_pct = _float("BIG_X_MOVE_PCT", 0.1),
+    minor_max_pips = _float("MINOR_MAX_PIPS", 5000.0),  # R2 hard cap; XAUUSDp: 5000=~$50
+    y_min_pct      = _float("Y_MIN_PCT",      25.0),    # R2 floor: minor >= % of X move
     tp_multiplier  = _float("TP_MULTIPLIER",  0.5),
 
     # Pullback Strength Gates
@@ -137,8 +138,9 @@ cfg = StrategyConfig(
     # Entry zone candle limit
     max_zone_candles = _int("MAX_ZONE_CANDLES", 3),
 
-    # Structure timing gates
-    max_structure_bars = _int("MAX_STRUCTURE_BARS", 5),
+    # Structure timing gates (Rules 2-3)
+    max_structure_bars = _int("MAX_STRUCTURE_BARS", 5),   # non-M1
+    m1_structure_bars  = _int("M1_STRUCTURE_BARS",  10),  # M1 only
 
     # Trade Settings
     magic    = _int("MAGIC_NUMBER", 20260412),

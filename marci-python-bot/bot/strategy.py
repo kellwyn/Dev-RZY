@@ -1,6 +1,6 @@
 """
-Marci Silfrain — Measured Move Trend Strategy  v1.02
-Python implementation mirroring MarciMeasuredMove_v1.02.mq5
+Marci Silfrain — Measured Move Trend Strategy  v2.01
+Python implementation mirroring MarciMeasuredMove_v2.01.mq5
 
 Setup sequence (both directions):
   Rule 1  — X% impulse move identifies the peak (HIGH or LOW trough)
@@ -74,8 +74,10 @@ class StrategyConfig:
 
     # Strategy
     candle_count:    int   = 20
-    big_x_move_pct:  float = 0.3           # X% impulse
-    y_max_pct:       float = 600.0         # capped to 90 at runtime
+    big_x_move_pct:  float = 0.1           # X% impulse threshold (v2.01: lowered to 0.1)
+    minor_max_pips:  float = 5000.0        # R2 hard cap: minor dist must not exceed N pips
+                                           #   XAUUSDp: 5000 pips = $50  — set per instrument
+    y_min_pct:       float = 25.0          # R2 floor: minor dist >= this % of X move
     tp_multiplier:   float = 0.5           # % of mid→minor distance
 
     # Pullback gates
@@ -109,8 +111,9 @@ class StrategyConfig:
     # Entry zone candle limit (Rule 5)
     max_zone_candles: int = 3
 
-    # Structure timing gates (Rules 1-4)
-    max_structure_bars: int = 5
+    # Structure timing gates (Rules 2-3)
+    max_structure_bars:  int = 5    # non-M1 timeframes
+    m1_structure_bars:   int = 10   # M1 only — wider window for faster timeframe
 
     # Trade settings
     magic:    int = 20260412
@@ -259,8 +262,8 @@ def _find_short_setup(
     n     = len(highs)
     if n < 6:
         return None
-    y_max = min(cfg.y_max_pct, 90.0)
-    max_s = cfg.max_structure_bars
+    # M1 uses wider timing window (10 bars); all other timeframes use 5
+    max_s = cfg.m1_structure_bars if cfg.timeframe.upper() == "M1" else cfg.max_structure_bars
 
     _r1_logged = False   # log only the first R1 candidate per scan
 
@@ -355,11 +358,22 @@ def _find_short_setup(
             continue
 
         minor_dist = peak_px - minor_px
-        if minor_dist <= 0 or minor_dist > (y_max / 100.0) * x_move_px:
+        if minor_dist <= 0:
+            continue
+        # Hard pip cap — instrument-configurable (XAUUSDp: 5000 pips = $50)
+        if pip > 0 and minor_dist > cfg.minor_max_pips * pip:
             if verbose and _r1_logged:
                 _log.warning(
-                    "[SHORT] R4 ✗  Y%% gate — minor dist %.2f exceeds %.0f%% of X move %.2f",
-                    minor_dist, y_max, x_move_px,
+                    "[SHORT] R4 ✗  minor dist %.2f exceeds pip cap %.0f pips (%.2f)",
+                    minor_dist, cfg.minor_max_pips, cfg.minor_max_pips * pip,
+                )
+            continue
+        # Floor — minor must be a meaningful drop relative to the impulse
+        if minor_dist < (cfg.y_min_pct / 100.0) * x_move_px:
+            if verbose and _r1_logged:
+                _log.warning(
+                    "[SHORT] R4 ✗  minor dist %.2f < %.0f%% floor of X move %.2f",
+                    minor_dist, cfg.y_min_pct, x_move_px,
                 )
             continue
 
@@ -407,8 +421,7 @@ def _find_long_setup(
     n     = len(highs)
     if n < 6:
         return None
-    y_max = min(cfg.y_max_pct, 90.0)
-    max_s = cfg.max_structure_bars
+    max_s = cfg.m1_structure_bars if cfg.timeframe.upper() == "M1" else cfg.max_structure_bars
 
     _r1_logged = False
 
@@ -503,11 +516,20 @@ def _find_long_setup(
             continue
 
         minor_dist = minor_px - trough_px
-        if minor_dist <= 0 or minor_dist > (y_max / 100.0) * x_move_px:
+        if minor_dist <= 0:
+            continue
+        if pip > 0 and minor_dist > cfg.minor_max_pips * pip:
             if verbose and _r1_logged:
                 _log.warning(
-                    "[LONG]  R4 ✗  Y%% gate — minor dist %.2f exceeds %.0f%% of X move %.2f",
-                    minor_dist, y_max, x_move_px,
+                    "[LONG]  R4 ✗  minor dist %.2f exceeds pip cap %.0f pips (%.2f)",
+                    minor_dist, cfg.minor_max_pips, cfg.minor_max_pips * pip,
+                )
+            continue
+        if minor_dist < (cfg.y_min_pct / 100.0) * x_move_px:
+            if verbose and _r1_logged:
+                _log.warning(
+                    "[LONG]  R4 ✗  minor dist %.2f < %.0f%% floor of X move %.2f",
+                    minor_dist, cfg.y_min_pct, x_move_px,
                 )
             continue
 
