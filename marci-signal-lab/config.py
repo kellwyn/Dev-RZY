@@ -40,7 +40,7 @@ class LabConfig:
     candle_count:     int   = 20
     big_x_move_pct:   float = 0.3
     y_max_pct:        float = 600.0   # capped to 90 at runtime
-    tp_multiplier:    float = 0.5
+    tp_multiplier:    float = 50.0          # % of mid→minor distance  e.g. 50 = 50%
     min_impulse_pips: float = 5.0
     min_pullback_pct: float = 2.0
     max_pullback_pct: float = 70.0

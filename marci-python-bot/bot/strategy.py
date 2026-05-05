@@ -78,7 +78,7 @@ class StrategyConfig:
     minor_max_pips:  float = 5000.0        # R2 hard cap: minor dist must not exceed N pips
                                            #   XAUUSDp: 5000 pips = $50  — set per instrument
     y_min_pct:       float = 25.0          # R2 floor: minor dist >= this % of X move
-    tp_multiplier:   float = 0.5           # % of mid→minor distance
+    tp_multiplier:   float = 50.0          # % of mid→minor distance  e.g. 50 = 50%
 
     # Pullback gates
     min_impulse_pips: float = 5.0

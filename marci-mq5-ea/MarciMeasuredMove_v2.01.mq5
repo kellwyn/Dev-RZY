@@ -83,7 +83,7 @@ input double InpBigXMovePct       = 0.1;    // X% — impulse move size that def
 input double InpMinorMaxPips      = 5000.0; // Rule 2 hard cap: minor dist must not exceed N pips
                                             //   XAUUSDp: 5000 pips = $50  |  set per instrument
 input double InpYMinPct           = 25.0;   // Rule 2 floor: minor dist must be >= this % of X move
-input double InpTPMultiplier      = 0.5;    // TP = this% × (midpoint → minor point distance)
+input double InpTPMultiplier      = 50.0;   // TP = this% × (midpoint → minor point distance)  e.g. 50 = 50%
 
 input group "=== Pullback Strength Gates ==="
 input double InpMinImpulsePips    = 5.0;    // Minimum impulse size (pips) — filters noise
