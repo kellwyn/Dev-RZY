@@ -47,7 +47,13 @@
 //|    · Rule 9: Post-TP cooldown (20 min if big move follows TP)  |
 //|    · Detailed alert output with all key price levels            |
 //|                                                                  |
-//|  v2.01  2026-04-28  — [in development]                          |
+//|  v2.01  2026-04-28  — Rule changes                              |
+//|    · Rule 1: X% threshold lowered to 0.1% (InpBigXMovePct)     |
+//|    · Rule 2: Minor dist must be >= 25% of X move (InpYMinPct)   |
+//|              M1 minor timing window expanded to 10 bars          |
+//|              (InpM1StructureBars); all other TFs stay 5 bars     |
+//|    · Rule 3: M1 pullback timing window expanded to 10 bars;      |
+//|              all other TFs stay 5 bars (same gate as Rule 2)     |
 //+------------------------------------------------------------------+
 #property copyright "Marci Silfrain Strategy EA"
 #property version   "2.01"
@@ -69,10 +75,10 @@ input double InpMaxLots           = 7.0;    // Hard cap on position size — nev
 
 input group "=== Strategy Parameters ==="
 input int    InpCandleCount       = 20;     // Historical bars to analyse
-input double InpBigXMovePct       = 0.3;    // X% — impulse move size that defines the peak
+input double InpBigXMovePct       = 0.1;    // X% — impulse move size that defines the peak
                                             //   Forex: 1-2%  |  Indices: 2-4%  |  Crypto: 5%+
-input double InpYMaxPct           = 600.0;  // Y% — max distance (minor pt → peak) as % of X move
-                                            //   Hard cap at runtime: 90%. Set high to effectively disable.
+input double InpYMaxPct           = 600.0;  // Y% max — max minor dist as % of X move (hard cap 90%)
+input double InpYMinPct           = 25.0;   // Y% min — minor dist must be >= this % of X move
 input double InpTPMultiplier      = 0.5;    // TP = this% × (midpoint → minor point distance)
 
 input group "=== Pullback Strength Gates ==="
@@ -83,8 +89,9 @@ input double InpMaxPullbackPct    = 70.0;   // Max pullback retracement % (deepe
 input group "=== Entry Zone Candle Gate (Rule 5) ==="
 input int    InpMaxZoneCandles    = 3;      // Max candles allowed to close between minor low and pb high
 
-input group "=== Structure Timing Gates (Rules 1-4) ==="
-input int    InpMaxStructureBars  = 5;      // Minor must form within N bars of peak; pb within N bars of minor
+input group "=== Structure Timing Gates (Rules 2-3) ==="
+input int    InpMaxStructureBars  = 5;      // Minor/pb timing window — non-M1 timeframes
+input int    InpM1StructureBars   = 10;     // Minor/pb timing window — M1 timeframe only
 
 input group "=== ICT Session Filter (Rule 8) ==="
 input bool   InpUseSessionFilter  = false;  // Only trade during active ICT sessions
@@ -254,8 +261,10 @@ void RunStrategy()
     //── Pre-check 3: Post-TP cooldown (Rule 9) ─────────────────────
     if(IsPostTPCooldown(closes)) return;
 
-    double pipVal = ((_Digits == 5 || _Digits == 3) ? _Point * 10.0 : _Point);
-    double yMaxPct = MathMin(InpYMaxPct, 90.0);  // hard cap Rule 2
+    double pipVal    = ((_Digits == 5 || _Digits == 3) ? _Point * 10.0 : _Point);
+    double yMaxPct   = MathMin(InpYMaxPct, 90.0);  // hard cap
+    // Rule 2-3: M1 uses wider timing window than higher timeframes
+    int    structBars = (Period() == PERIOD_M1) ? InpM1StructureBars : InpMaxStructureBars;
 
     bool shortFired = false;
 
@@ -273,8 +282,9 @@ void RunStrategy()
 
         bool shortFound = FindShortSetup(highs, lows, opens, closes,
                                           InpCandleCount, InpBigXMovePct,
-                                          yMaxPct, InpMinPullbackPct, InpMaxPullbackPct,
-                                          pipVal, InpMinImpulsePips, InpMaxStructureBars,
+                                          yMaxPct, InpYMinPct,
+                                          InpMinPullbackPct, InpMaxPullbackPct,
+                                          pipVal, InpMinImpulsePips, structBars,
                                           peakBar, peakPx, minorBar, minorPx, pbBar, pbPx);
 
         // Reset 1-trade guard when structure expires; skip same structure if already traded
@@ -351,8 +361,9 @@ void RunStrategy()
 
         bool longFound = FindLongSetup(highs, lows, opens, closes,
                                         InpCandleCount, InpBigXMovePct,
-                                        yMaxPct, InpMinPullbackPct, InpMaxPullbackPct,
-                                        pipVal, InpMinImpulsePips, InpMaxStructureBars,
+                                        yMaxPct, InpYMinPct,
+                                        InpMinPullbackPct, InpMaxPullbackPct,
+                                        pipVal, InpMinImpulsePips, structBars,
                                         troughBar, troughPx, minorBar, minorPx, pbBar, pbPx);
 
         if(!longFound) g_execLongTrPx = 0.0;
@@ -440,7 +451,7 @@ void RunStrategy()
 bool FindShortSetup(
     const double &highs[], const double &lows[],
     const double &opens[], const double &closes[],
-    int bars, double xPct, double yMaxPct,
+    int bars, double xPct, double yMaxPct, double yMinPct,
     double minPbPct, double maxPbPct,
     double pipVal, double minImpPips, int maxStructBars,
     int &peakBar, double &peakPx,
@@ -494,9 +505,11 @@ bool FindShortSetup(
         if(mnPx   >= pbPx_c) continue; // minor must be below pb
         if(pbBar_c < 2)      continue; // need 2 confirmation bars
 
-        //── Step 4: Y% gate ─────────────────────────────────────────
+        //── Step 4: Y% gate (min and max) ───────────────────────────
         double mnDist = pkPx - mnPx;
-        if(mnDist <= 0 || mnDist > (yMaxPct / 100.0) * xMove) continue;
+        if(mnDist <= 0) continue;
+        if(mnDist > (yMaxPct / 100.0) * xMove) continue;   // too large — not a minor move
+        if(mnDist < (yMinPct / 100.0) * xMove) continue;   // too small — not a meaningful drop
 
         //── Step 5: Pullback depth ───────────────────────────────────
         double pbDepth = (pbPx_c - mnPx) / (pkPx - mnPx) * 100.0;
@@ -537,7 +550,7 @@ bool FindShortSetup(
 bool FindLongSetup(
     const double &highs[], const double &lows[],
     const double &opens[], const double &closes[],
-    int bars, double xPct, double yMaxPct,
+    int bars, double xPct, double yMaxPct, double yMinPct,
     double minPbPct, double maxPbPct,
     double pipVal, double minImpPips, int maxStructBars,
     int &troughBar, double &troughPx,
@@ -586,9 +599,11 @@ bool FindLongSetup(
         if(mnPx   <= pbPx_c) continue;  // minor must be above pb
         if(pbBar_c < 2)      continue;
 
-        //── Step 4: Y% gate ─────────────────────────────────────────
+        //── Step 4: Y% gate (min and max) ───────────────────────────
         double mnDist = mnPx - trPx;
-        if(mnDist <= 0 || mnDist > (yMaxPct / 100.0) * xMove) continue;
+        if(mnDist <= 0) continue;
+        if(mnDist > (yMaxPct / 100.0) * xMove) continue;   // too large — not a minor move
+        if(mnDist < (yMinPct / 100.0) * xMove) continue;   // too small — not a meaningful rise
 
         //── Step 5: Pullback depth ───────────────────────────────────
         double pbDepth = (mnPx - pbPx_c) / (mnPx - trPx) * 100.0;
