@@ -31,18 +31,52 @@ echo "Bot dir: $BOT_DIR"
 
 ```bash
 cd "$BOT_DIR" && python -u -c "
-import os; os.environ['SYMBOL'] = 'SYMBOL_HERE'
-from dotenv import load_dotenv; load_dotenv()
+from pathlib import Path
+from dotenv import load_dotenv
+import os
+_bot = Path.cwd()
+load_dotenv(_bot.parent / '.env', override=True)   # root: strategy params
+load_dotenv(_bot / '.env',        override=True)   # local: symbol/connection overrides
+os.environ['SYMBOL'] = 'SYMBOL_HERE'               # explicit symbol wins last
+
 from bot.connection import connect; connect()
 import MetaTrader5 as mt5
 from bot.strategy import (
+    StrategyConfig,
     _fetch, _gap_guard, is_in_trading_session, check_and_update_tp_state,
     is_post_tp_cooldown, is_big_move_cooldown, is_near_key_level,
     _find_short_setup, _find_long_setup,
     _confirm_short_entry, _confirm_long_entry,
     _pip_size, get_current_session
 )
-from main import cfg
+
+def _f(k, d): return float(os.getenv(k, d))
+def _i(k, d): return int(os.getenv(k, d))
+def _b(k, d):
+    v = os.getenv(k); return d if v is None else v.strip().lower() in ('true','1','yes')
+def _s(k, d): return os.getenv(k, d)
+
+cfg = StrategyConfig(
+    symbol=_s('SYMBOL','XAUUSD'), timeframe=_s('TIMEFRAME','M1'),
+    candle_count=_i('CANDLE_COUNT',20), big_x_move_pct=_f('BIG_X_MOVE_PCT',0.1),
+    minor_max_pips=_f('MINOR_MAX_PIPS',5000.0), y_min_pct=_f('Y_MIN_PCT',25.0),
+    tp_multiplier=_f('TP_MULTIPLIER',0.5),
+    min_impulse_pips=_f('MIN_IMPULSE_PIPS',5.0),
+    min_pullback_pct=_f('MIN_PULLBACK_PCT',2.0), max_pullback_pct=_f('MAX_PULLBACK_PCT',70.0),
+    use_session=_b('USE_SESSION',False), gmt_offset=_i('GMT_OFFSET',0),
+    asian_start_h=_i('ASIAN_START_H',23), asian_end_h=_i('ASIAN_END_H',9),
+    london_start_h=_i('LONDON_START_H',7), london_end_h=_i('LONDON_END_H',16),
+    ny_start_h=_i('NY_START_H',12), ny_end_h=_i('NY_END_H',17),
+    use_post_tp_cooldown=_b('USE_POST_TP_COOLDOWN',True),
+    post_tp_cooldown_mins=_i('POST_TP_COOLDOWN_MINS',20),
+    use_big_move_cooldown=_b('USE_BIG_MOVE_COOLDOWN',True),
+    big_move_pct=_f('BIG_MOVE_PCT',1.0), big_move_cooldown_bars=_i('BIG_MOVE_COOLDOWN_BARS',20),
+    use_key_level=_b('USE_KEY_LEVEL',True), key_level_pips=_f('KEY_LEVEL_PIPS',10.0),
+    max_zone_candles=_i('MAX_ZONE_CANDLES',3),
+    max_structure_bars=_i('MAX_STRUCTURE_BARS',5), m1_structure_bars=_i('M1_STRUCTURE_BARS',10),
+    magic=_i('MAGIC_NUMBER',20260412), slippage=_i('SLIPPAGE',20),
+)
+
 print(f'Symbol          : {cfg.symbol}')
 df = _fetch(cfg.symbol, cfg.timeframe, cfg.candle_count)
 if df is None:
