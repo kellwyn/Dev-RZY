@@ -124,6 +124,7 @@ class StrategyConfig:
 
 _last_tp_exit_time:  Optional[datetime] = None
 _last_tp_exit_price: float              = 0.0
+_scan_log:           list               = []  # cleared each live scan; rendered by print_dashboard
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -257,7 +258,7 @@ def _find_short_setup(
     opens: np.ndarray, closes: np.ndarray,
     cfg: StrategyConfig, pip: float,
     *,
-    verbose: bool = False,
+    scan_log=None,  # list | None — append rule results; None in replay mode
 ) -> Optional[dict]:
     n     = len(highs)
     if n < 6:
@@ -288,73 +289,64 @@ def _find_short_setup(
 
         peak_px = float(highs[peak_idx])
 
-        if verbose and not _r1_logged:
-            _log.info(
-                "[SHORT] R1 ✓  X%% UP %.2f%%  |  peak body=%.2f  prior base=%.2f  "
-                "(bar -%d)",
-                x_move_pct, peak_body, prior_body_low, n - 1 - peak_idx,
+        if scan_log is not None and not _r1_logged:
+            scan_log.append(
+                f"[SHORT] R1 ✓  X% UP {x_move_pct:.2f}%  |  peak body={peak_body:.2f}"
+                f"  prior base={prior_body_low:.2f}  (bar -{n - 1 - peak_idx})"
             )
             _r1_logged = True
 
         # ── Rule 2: MINOR LOW within max_s bars after peak ────────────
         minor_end = min(peak_idx + 1 + max_s, n)
         if minor_end <= peak_idx + 1:
-            if verbose and _r1_logged:
-                _log.warning(
-                    "[SHORT] R2 ✗  no room for minor low after peak (need %d bars)", max_s
-                )
+            if scan_log is not None and _r1_logged:
+                scan_log.append(f"[SHORT] R2 ✗  no room for minor low after peak (need {max_s} bars)")
             continue
         minor_local = int(np.argmin(lows[peak_idx + 1 : minor_end]))
         minor_idx   = peak_idx + 1 + minor_local
         minor_px    = float(lows[minor_idx])
 
-        if verbose and _r1_logged:
-            _log.info(
-                "[SHORT] R2 ✓  Minor LOW=%.2f  |  %d bar(s) after peak",
-                minor_px, minor_idx - peak_idx,
+        if scan_log is not None and _r1_logged:
+            scan_log.append(
+                f"[SHORT] R2 ✓  Minor LOW={minor_px:.2f}  |  {minor_idx - peak_idx} bar(s) after peak"
             )
 
         # ── Rule 3: PULLBACK PEAK within max_s bars after minor ───────
         pb_end = min(minor_idx + 1 + max_s, n)
         if pb_end <= minor_idx + 1:
-            if verbose and _r1_logged:
-                _log.warning(
-                    "[SHORT] R3 ✗  no room for pullback after minor (need %d bars)", max_s
-                )
+            if scan_log is not None and _r1_logged:
+                scan_log.append(f"[SHORT] R3 ✗  no room for pullback after minor (need {max_s} bars)")
             continue
         pb_seg = highs[minor_idx + 1 : pb_end]
         if len(pb_seg) == 0:
-            if verbose and _r1_logged:
-                _log.warning("[SHORT] R3 ✗  empty pullback window")
+            if scan_log is not None and _r1_logged:
+                scan_log.append("[SHORT] R3 ✗  empty pullback window")
             continue
         pb_local = int(np.argmax(pb_seg))
         pb_idx   = minor_idx + 1 + pb_local
         pb_px    = float(highs[pb_idx])
 
-        if verbose and _r1_logged:
-            _log.info(
-                "[SHORT] R3 ✓  Pullback HIGH=%.2f  |  %d bar(s) after minor",
-                pb_px, pb_idx - minor_idx,
+        if scan_log is not None and _r1_logged:
+            scan_log.append(
+                f"[SHORT] R3 ✓  Pullback HIGH={pb_px:.2f}  |  {pb_idx - minor_idx} bar(s) after minor"
             )
 
         # ── Rule 4: structural validity ───────────────────────────────
         if pb_px >= peak_px:
-            if verbose and _r1_logged:
-                _log.warning(
-                    "[SHORT] R4 ✗  pb %.2f >= peak %.2f — not a lower high",
-                    pb_px, peak_px,
+            if scan_log is not None and _r1_logged:
+                scan_log.append(
+                    f"[SHORT] R4 ✗  pb {pb_px:.2f} >= peak {peak_px:.2f} — not a lower high"
                 )
             continue
         if minor_px >= pb_px:
-            if verbose and _r1_logged:
-                _log.warning(
-                    "[SHORT] R4 ✗  minor %.2f >= pb %.2f — minor not below pullback",
-                    minor_px, pb_px,
+            if scan_log is not None and _r1_logged:
+                scan_log.append(
+                    f"[SHORT] R4 ✗  minor {minor_px:.2f} >= pb {pb_px:.2f} — minor not below pullback"
                 )
             continue
         if n - pb_idx - 1 < 2:
-            if verbose and _r1_logged:
-                _log.warning("[SHORT] R4 ✗  fewer than 2 confirmation bars after pullback")
+            if scan_log is not None and _r1_logged:
+                scan_log.append("[SHORT] R4 ✗  fewer than 2 confirmation bars after pullback")
             continue
 
         minor_dist = peak_px - minor_px
@@ -362,43 +354,42 @@ def _find_short_setup(
             continue
         # Hard pip cap — instrument-configurable (XAUUSDp: 5000 pips = $50)
         if pip > 0 and minor_dist > cfg.minor_max_pips * pip:
-            if verbose and _r1_logged:
-                _log.warning(
-                    "[SHORT] R4 ✗  minor dist %.2f exceeds pip cap %.0f pips (%.2f)",
-                    minor_dist, cfg.minor_max_pips, cfg.minor_max_pips * pip,
+            if scan_log is not None and _r1_logged:
+                scan_log.append(
+                    f"[SHORT] R4 ✗  minor dist {minor_dist:.2f} exceeds pip cap"
+                    f" {cfg.minor_max_pips:.0f} pips ({cfg.minor_max_pips * pip:.2f})"
                 )
             continue
         # Floor — minor must be a meaningful drop relative to the impulse
         if minor_dist < (cfg.y_min_pct / 100.0) * x_move_px:
-            if verbose and _r1_logged:
-                _log.warning(
-                    "[SHORT] R4 ✗  minor dist %.2f < %.0f%% floor of X move %.2f",
-                    minor_dist, cfg.y_min_pct, x_move_px,
+            if scan_log is not None and _r1_logged:
+                scan_log.append(
+                    f"[SHORT] R4 ✗  minor dist {minor_dist:.2f} < {cfg.y_min_pct:.0f}%"
+                    f" floor of X move {x_move_px:.2f}"
                 )
             continue
 
         pb_depth = (pb_px - minor_px) / (peak_px - minor_px) * 100.0
         if not (cfg.min_pullback_pct <= pb_depth <= cfg.max_pullback_pct):
-            if verbose and _r1_logged:
-                _log.warning(
-                    "[SHORT] R4 ✗  pb depth %.1f%% outside [%.0f%%–%.0f%%]",
-                    pb_depth, cfg.min_pullback_pct, cfg.max_pullback_pct,
+            if scan_log is not None and _r1_logged:
+                scan_log.append(
+                    f"[SHORT] R4 ✗  pb depth {pb_depth:.1f}% outside"
+                    f" [{cfg.min_pullback_pct:.0f}%–{cfg.max_pullback_pct:.0f}%]"
                 )
             continue
 
         if pip > 0 and (minor_dist / pip) < cfg.min_impulse_pips:
-            if verbose and _r1_logged:
-                _log.warning(
-                    "[SHORT] R4 ✗  impulse %.1f pips < min %.0f pips",
-                    minor_dist / pip, cfg.min_impulse_pips,
+            if scan_log is not None and _r1_logged:
+                scan_log.append(
+                    f"[SHORT] R4 ✗  impulse {minor_dist / pip:.1f} pips"
+                    f" < min {cfg.min_impulse_pips:.0f} pips"
                 )
             continue
 
-        if verbose:
-            _log.info(
-                "[SHORT] R4 ✓  depth=%.1f%%  impulse=%.1f pips  |  "
-                "peak=%.2f  minor=%.2f  pb=%.2f",
-                pb_depth, minor_dist / pip, peak_px, minor_px, pb_px,
+        if scan_log is not None:
+            scan_log.append(
+                f"[SHORT] R4 ✓  depth={pb_depth:.1f}%  impulse={minor_dist / pip:.1f} pips"
+                f"  |  peak={peak_px:.2f}  minor={minor_px:.2f}  pb={pb_px:.2f}"
             )
 
         return dict(
@@ -408,6 +399,10 @@ def _find_short_setup(
             x_move_pct=x_move_pct,
         )
 
+    if scan_log is not None and not _r1_logged:
+        scan_log.append(
+            f"[SHORT] R1 ✗  no X% impulse >= {cfg.big_x_move_pct:.2f}% in {n}-bar window"
+        )
     return None
 
 
@@ -416,7 +411,7 @@ def _find_long_setup(
     opens: np.ndarray, closes: np.ndarray,
     cfg: StrategyConfig, pip: float,
     *,
-    verbose: bool = False,
+    scan_log=None,  # list | None — append rule results; None in replay mode
 ) -> Optional[dict]:
     n     = len(highs)
     if n < 6:
@@ -446,115 +441,105 @@ def _find_long_setup(
 
         trough_px = float(lows[trough_idx])
 
-        if verbose and not _r1_logged:
-            _log.info(
-                "[LONG]  R1 ✓  X%% DOWN %.2f%%  |  trough body=%.2f  prior base=%.2f  "
-                "(bar -%d)",
-                x_move_pct, trough_body, prior_body_high, n - 1 - trough_idx,
+        if scan_log is not None and not _r1_logged:
+            scan_log.append(
+                f"[LONG]  R1 ✓  X% DOWN {x_move_pct:.2f}%  |  trough body={trough_body:.2f}"
+                f"  prior base={prior_body_high:.2f}  (bar -{n - 1 - trough_idx})"
             )
             _r1_logged = True
 
         # ── Rule 2: MINOR HIGH within max_s bars after trough ─────────
         minor_end = min(trough_idx + 1 + max_s, n)
         if minor_end <= trough_idx + 1:
-            if verbose and _r1_logged:
-                _log.warning(
-                    "[LONG]  R2 ✗  no room for minor high after trough (need %d bars)", max_s
-                )
+            if scan_log is not None and _r1_logged:
+                scan_log.append(f"[LONG]  R2 ✗  no room for minor high after trough (need {max_s} bars)")
             continue
         minor_local = int(np.argmax(highs[trough_idx + 1 : minor_end]))
         minor_idx   = trough_idx + 1 + minor_local
         minor_px    = float(highs[minor_idx])
 
-        if verbose and _r1_logged:
-            _log.info(
-                "[LONG]  R2 ✓  Minor HIGH=%.2f  |  %d bar(s) after trough",
-                minor_px, minor_idx - trough_idx,
+        if scan_log is not None and _r1_logged:
+            scan_log.append(
+                f"[LONG]  R2 ✓  Minor HIGH={minor_px:.2f}  |  {minor_idx - trough_idx} bar(s) after trough"
             )
 
         # ── Rule 3: PULLBACK TROUGH within max_s bars after minor ─────
         pb_end = min(minor_idx + 1 + max_s, n)
         if pb_end <= minor_idx + 1:
-            if verbose and _r1_logged:
-                _log.warning(
-                    "[LONG]  R3 ✗  no room for pullback after minor (need %d bars)", max_s
-                )
+            if scan_log is not None and _r1_logged:
+                scan_log.append(f"[LONG]  R3 ✗  no room for pullback after minor (need {max_s} bars)")
             continue
         pb_seg = lows[minor_idx + 1 : pb_end]
         if len(pb_seg) == 0:
-            if verbose and _r1_logged:
-                _log.warning("[LONG]  R3 ✗  empty pullback window")
+            if scan_log is not None and _r1_logged:
+                scan_log.append("[LONG]  R3 ✗  empty pullback window")
             continue
         pb_local = int(np.argmin(pb_seg))
         pb_idx   = minor_idx + 1 + pb_local
         pb_px    = float(lows[pb_idx])
 
-        if verbose and _r1_logged:
-            _log.info(
-                "[LONG]  R3 ✓  Pullback LOW=%.2f  |  %d bar(s) after minor",
-                pb_px, pb_idx - minor_idx,
+        if scan_log is not None and _r1_logged:
+            scan_log.append(
+                f"[LONG]  R3 ✓  Pullback LOW={pb_px:.2f}  |  {pb_idx - minor_idx} bar(s) after minor"
             )
 
         # ── Rule 4: structural validity ───────────────────────────────
         if pb_px <= trough_px:
-            if verbose and _r1_logged:
-                _log.warning(
-                    "[LONG]  R4 ✗  pb %.2f <= trough %.2f — not a higher low",
-                    pb_px, trough_px,
+            if scan_log is not None and _r1_logged:
+                scan_log.append(
+                    f"[LONG]  R4 ✗  pb {pb_px:.2f} <= trough {trough_px:.2f} — not a higher low"
                 )
             continue
         if minor_px <= pb_px:
-            if verbose and _r1_logged:
-                _log.warning(
-                    "[LONG]  R4 ✗  minor %.2f <= pb %.2f — minor not above pullback",
-                    minor_px, pb_px,
+            if scan_log is not None and _r1_logged:
+                scan_log.append(
+                    f"[LONG]  R4 ✗  minor {minor_px:.2f} <= pb {pb_px:.2f} — minor not above pullback"
                 )
             continue
         if n - pb_idx - 1 < 2:
-            if verbose and _r1_logged:
-                _log.warning("[LONG]  R4 ✗  fewer than 2 confirmation bars after pullback")
+            if scan_log is not None and _r1_logged:
+                scan_log.append("[LONG]  R4 ✗  fewer than 2 confirmation bars after pullback")
             continue
 
         minor_dist = minor_px - trough_px
         if minor_dist <= 0:
             continue
         if pip > 0 and minor_dist > cfg.minor_max_pips * pip:
-            if verbose and _r1_logged:
-                _log.warning(
-                    "[LONG]  R4 ✗  minor dist %.2f exceeds pip cap %.0f pips (%.2f)",
-                    minor_dist, cfg.minor_max_pips, cfg.minor_max_pips * pip,
+            if scan_log is not None and _r1_logged:
+                scan_log.append(
+                    f"[LONG]  R4 ✗  minor dist {minor_dist:.2f} exceeds pip cap"
+                    f" {cfg.minor_max_pips:.0f} pips ({cfg.minor_max_pips * pip:.2f})"
                 )
             continue
         if minor_dist < (cfg.y_min_pct / 100.0) * x_move_px:
-            if verbose and _r1_logged:
-                _log.warning(
-                    "[LONG]  R4 ✗  minor dist %.2f < %.0f%% floor of X move %.2f",
-                    minor_dist, cfg.y_min_pct, x_move_px,
+            if scan_log is not None and _r1_logged:
+                scan_log.append(
+                    f"[LONG]  R4 ✗  minor dist {minor_dist:.2f} < {cfg.y_min_pct:.0f}%"
+                    f" floor of X move {x_move_px:.2f}"
                 )
             continue
 
         pb_depth = (minor_px - pb_px) / (minor_px - trough_px) * 100.0
         if not (cfg.min_pullback_pct <= pb_depth <= cfg.max_pullback_pct):
-            if verbose and _r1_logged:
-                _log.warning(
-                    "[LONG]  R4 ✗  pb depth %.1f%% outside [%.0f%%–%.0f%%]",
-                    pb_depth, cfg.min_pullback_pct, cfg.max_pullback_pct,
+            if scan_log is not None and _r1_logged:
+                scan_log.append(
+                    f"[LONG]  R4 ✗  pb depth {pb_depth:.1f}% outside"
+                    f" [{cfg.min_pullback_pct:.0f}%–{cfg.max_pullback_pct:.0f}%]"
                 )
             continue
 
         if pip > 0 and (minor_dist / pip) < cfg.min_impulse_pips:
-            if verbose and _r1_logged:
-                _log.warning(
-                    "[LONG]  R4 ✗  impulse %.1f pips < min %.0f pips",
-                    minor_dist / pip, cfg.min_impulse_pips,
+            if scan_log is not None and _r1_logged:
+                scan_log.append(
+                    f"[LONG]  R4 ✗  impulse {minor_dist / pip:.1f} pips"
+                    f" < min {cfg.min_impulse_pips:.0f} pips"
                 )
             continue
 
-        if verbose:
-            _log.info(
-                "[LONG]  R4 ✓  depth=%.1f%%  impulse=%.1f pips  |  "
-                "trough=%.2f  minor=%.2f  pb=%.2f",
-                pb_depth, minor_dist / pip, trough_px, minor_px, pb_px,
+        if scan_log is not None:
+            scan_log.append(
+                f"[LONG]  R4 ✓  depth={pb_depth:.1f}%  impulse={minor_dist / pip:.1f} pips"
+                f"  |  trough={trough_px:.2f}  minor={minor_px:.2f}  pb={pb_px:.2f}"
             )
 
         return dict(
@@ -564,6 +549,10 @@ def _find_long_setup(
             x_move_pct=x_move_pct,
         )
 
+    if scan_log is not None and not _r1_logged:
+        scan_log.append(
+            f"[LONG]  R1 ✗  no X% impulse >= {cfg.big_x_move_pct:.2f}% in {n}-bar window"
+        )
     return None
 
 
@@ -703,11 +692,12 @@ def find_setup(
 
     Returns a TradeSetup if found, otherwise None.
     """
-    # live=True  → full R1-R7 logging in the terminal
+    # live=True  → full R1-R7 scan log rendered in print_dashboard
     # live=False → replay mode; ReplayEngine logs [TRADE] lines instead
     _live = bar_provider is None
 
     if _live:
+        _scan_log.clear()
         df = _fetch(cfg.symbol, cfg.timeframe, cfg.candle_count)
     else:
         df = bar_provider()
@@ -722,14 +712,16 @@ def find_setup(
     # Pre-check 1: gap guard
     if not _gap_guard(df):
         if _live:
-            _log.warning("[GATE] Gap guard BLOCKED — daily open outside prior bar range")
+            _scan_log.append("[GATE] Gap guard BLOCKED — daily open outside prior bar range")
         return None
 
     # Pre-check 2: ICT session filter (Rule 8)
     if not is_in_trading_session(cfg):
         if _live:
-            _log.warning("[GATE] Session filter BLOCKED — outside active ICT session (%s)",
-                         get_current_session(cfg) or "none")
+            _scan_log.append(
+                f"[GATE] Session filter BLOCKED — outside active ICT session"
+                f" ({get_current_session(cfg) or 'none'})"
+            )
         return None
 
     # Pre-check 3: post-TP cooldown (Rule 9) — skipped in replay (no MT5 deal history)
@@ -737,8 +729,11 @@ def find_setup(
         check_and_update_tp_state(cfg)
     if is_post_tp_cooldown(float(closes[-1]), cfg):
         if _live:
-            _log.warning("[GATE] Post-TP cooldown BLOCKED — waiting for cooldown to expire")
+            _scan_log.append("[GATE] Post-TP cooldown BLOCKED — waiting for cooldown to expire")
         return None
+
+    if _live:
+        _scan_log.append("[GATE] Pre-checks passed  (gap guard ✓  session ✓  cooldown ✓)")
 
     pip     = _pip_size(cfg.symbol)
     session = get_current_session(cfg)
@@ -747,27 +742,32 @@ def find_setup(
     if tick is None:
         return None
 
+    _sl = _scan_log if _live else None
+
     # ── Try SHORT ─────────────────────────────────────────────────────────────
-    s = _find_short_setup(highs, lows, opens, closes, cfg, pip, verbose=_live)
+    s = _find_short_setup(highs, lows, opens, closes, cfg, pip, scan_log=_sl)
     if s:
         enter, pb_px = _confirm_short_entry(s, highs, lows, closes, float(tick.bid), cfg)
         if enter:
             if _live:
-                _log.info("[SHORT] R5 ✓  Entry zone confirmed  |  bid=%.2f  zone: %.2f–%.2f",
-                          tick.bid, s["minor_px"], pb_px)
+                _scan_log.append(
+                    f"[SHORT] R5 ✓  Entry zone confirmed  |  bid={tick.bid:.2f}"
+                    f"  zone: {s['minor_px']:.2f}–{pb_px:.2f}"
+                )
             cur = float(tick.bid)
 
             if is_big_move_cooldown("SHORT", opens, closes, cfg):
                 if _live:
-                    _log.warning("[SHORT] R7 ✗  Big move cooldown BLOCKED")
+                    _scan_log.append("[SHORT] R7 ✗  Big move cooldown BLOCKED")
                 s = None
             elif is_near_key_level(cfg.symbol, cur, "SHORT", cfg):
                 if _live:
-                    _log.warning("[SHORT] R7 ✗  Key level filter BLOCKED — within %.0f pips",
-                                 cfg.key_level_pips)
+                    _scan_log.append(
+                        f"[SHORT] R7 ✗  Key level filter BLOCKED — within {cfg.key_level_pips:.0f} pips"
+                    )
                 s = None
             elif _live:
-                _log.info("[SHORT] R7 ✓  All filters clear")
+                _scan_log.append("[SHORT] R7 ✓  All filters clear")
 
             if s:
                 midpoint     = (s["peak_px"] + s["minor_px"]) / 2.0
@@ -784,9 +784,10 @@ def find_setup(
                 if rr >= cfg.min_rr:
                     lots = _calc_lots(cur, sl_px, cfg)
                     if _live:
-                        _log.info("[SHORT] ▶▶▶ SIGNAL  entry=%.2f  SL=%.2f  TP=%.2f  "
-                                  "RR=1:%.2f  lots=%.2f  [%s]",
-                                  cur, sl_px, tp_px, rr, lots, session)
+                        _scan_log.append(
+                            f"[SHORT] ▶▶▶ SIGNAL  entry={cur:.2f}  SL={sl_px:.2f}"
+                            f"  TP={tp_px:.2f}  RR=1:{rr:.2f}  lots={lots:.2f}  [{session}]"
+                        )
                     return TradeSetup(
                         symbol=cfg.symbol, timeframe=cfg.timeframe,
                         direction="SHORT",
@@ -802,33 +803,37 @@ def find_setup(
                             pb_px, midpoint, s["x_move_pct"], session),
                     )
                 elif _live:
-                    _log.warning("[SHORT] RR %.2f < min %.2f — skipping", rr, cfg.min_rr)
+                    _scan_log.append(f"[SHORT] RR {rr:.2f} < min {cfg.min_rr:.2f} — skipping")
         elif _live:
-            _log.warning("[SHORT] R5 ✗  Entry zone rejected  |  bid=%.2f  "
-                         "(minor=%.2f  eff_pb=%.2f)",
-                         tick.bid, s["minor_px"], pb_px)
+            _scan_log.append(
+                f"[SHORT] R5 ✗  Entry zone rejected  |  bid={tick.bid:.2f}"
+                f"  (minor={s['minor_px']:.2f}  eff_pb={pb_px:.2f})"
+            )
 
     # ── Try LONG ──────────────────────────────────────────────────────────────
-    lg = _find_long_setup(highs, lows, opens, closes, cfg, pip, verbose=_live)
+    lg = _find_long_setup(highs, lows, opens, closes, cfg, pip, scan_log=_sl)
     if lg:
         enter, pb_px = _confirm_long_entry(lg, highs, lows, closes, float(tick.ask), cfg)
         if enter:
             if _live:
-                _log.info("[LONG]  R5 ✓  Entry zone confirmed  |  ask=%.2f  zone: %.2f–%.2f",
-                          tick.ask, pb_px, lg["minor_px"])
+                _scan_log.append(
+                    f"[LONG]  R5 ✓  Entry zone confirmed  |  ask={tick.ask:.2f}"
+                    f"  zone: {pb_px:.2f}–{lg['minor_px']:.2f}"
+                )
             cur = float(tick.ask)
 
             if is_big_move_cooldown("LONG", opens, closes, cfg):
                 if _live:
-                    _log.warning("[LONG]  R7 ✗  Big move cooldown BLOCKED")
+                    _scan_log.append("[LONG]  R7 ✗  Big move cooldown BLOCKED")
                 lg = None
             elif is_near_key_level(cfg.symbol, cur, "LONG", cfg):
                 if _live:
-                    _log.warning("[LONG]  R7 ✗  Key level filter BLOCKED — within %.0f pips",
-                                 cfg.key_level_pips)
+                    _scan_log.append(
+                        f"[LONG]  R7 ✗  Key level filter BLOCKED — within {cfg.key_level_pips:.0f} pips"
+                    )
                 lg = None
             elif _live:
-                _log.info("[LONG]  R7 ✓  All filters clear")
+                _scan_log.append("[LONG]  R7 ✓  All filters clear")
 
             if lg:
                 midpoint = (lg["trough_px"] + lg["minor_px"]) / 2.0
@@ -845,9 +850,10 @@ def find_setup(
                 if rr >= cfg.min_rr:
                     lots = _calc_lots(cur, sl_px, cfg)
                     if _live:
-                        _log.info("[LONG]  ▶▶▶ SIGNAL  entry=%.2f  SL=%.2f  TP=%.2f  "
-                                  "RR=1:%.2f  lots=%.2f  [%s]",
-                                  cur, sl_px, tp_px, rr, lots, session)
+                        _scan_log.append(
+                            f"[LONG]  ▶▶▶ SIGNAL  entry={cur:.2f}  SL={sl_px:.2f}"
+                            f"  TP={tp_px:.2f}  RR=1:{rr:.2f}  lots={lots:.2f}  [{session}]"
+                        )
                     return TradeSetup(
                         symbol=cfg.symbol, timeframe=cfg.timeframe,
                         direction="LONG",
@@ -863,11 +869,12 @@ def find_setup(
                             pb_px, midpoint, lg["x_move_pct"], session),
                     )
                 elif _live:
-                    _log.warning("[LONG]  RR %.2f < min %.2f — skipping", rr, cfg.min_rr)
+                    _scan_log.append(f"[LONG]  RR {rr:.2f} < min {cfg.min_rr:.2f} — skipping")
         elif _live:
-            _log.warning("[LONG]  R5 ✗  Entry zone rejected  |  ask=%.2f  "
-                         "(eff_pb=%.2f  minor=%.2f)",
-                         tick.ask, pb_px, lg["minor_px"])
+            _scan_log.append(
+                f"[LONG]  R5 ✗  Entry zone rejected  |  ask={tick.ask:.2f}"
+                f"  (eff_pb={pb_px:.2f}  minor={lg['minor_px']:.2f})"
+            )
 
     return None
 
@@ -928,11 +935,17 @@ def print_dashboard(setup: Optional[TradeSetup], cfg: StrategyConfig):
     print(f"  Scan : {now}  |  {cfg.symbol} [{cfg.timeframe}]")
     print(sep)
 
+    for line in _scan_log:
+        print(f"  {line}")
+
     if setup is None:
+        if _scan_log:
+            print()
         print("  No setup detected — monitoring...")
         print(sep)
         return
 
+    print()
     for note in setup.setup_notes:
         print(f"  {note}")
     print(sep)
