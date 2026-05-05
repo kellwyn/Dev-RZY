@@ -60,7 +60,7 @@ cfg = StrategyConfig(
     symbol=_s('SYMBOL','XAUUSD'), timeframe=_s('TIMEFRAME','M1'),
     candle_count=_i('CANDLE_COUNT',20), big_x_move_pct=_f('BIG_X_MOVE_PCT',0.1),
     minor_max_pips=_f('MINOR_MAX_PIPS',5000.0), y_min_pct=_f('Y_MIN_PCT',25.0),
-    tp_multiplier=_f('TP_MULTIPLIER',0.5),
+    tp_multiplier=_f('TP_MULTIPLIER',50.0), min_tp_dist=_f('MIN_TP_DIST',1.0),
     min_impulse_pips=_f('MIN_IMPULSE_PIPS',5.0),
     min_pullback_pct=_f('MIN_PULLBACK_PCT',2.0), max_pullback_pct=_f('MAX_PULLBACK_PCT',70.0),
     use_session=_b('USE_SESSION',False), gmt_offset=_i('GMT_OFFSET',0),

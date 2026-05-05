@@ -776,6 +776,10 @@ def find_setup(
                             f"[SHORT] R✗  TP distance {cur - tp_px:.2f} < min {cfg.min_tp_dist:.2f} — skipping"
                         )
                     s = None
+                elif _live:
+                    _scan_log.append(
+                        f"[SHORT] R✓  TP distance {cur - tp_px:.2f} >= min {cfg.min_tp_dist:.2f}"
+                    )
 
                 if s:
                     risk   = sl_px - cur
@@ -850,6 +854,10 @@ def find_setup(
                             f"[LONG]  R✗  TP distance {tp_px - cur:.2f} < min {cfg.min_tp_dist:.2f} — skipping"
                         )
                     lg = None
+                elif _live:
+                    _scan_log.append(
+                        f"[LONG]  R✓  TP distance {tp_px - cur:.2f} >= min {cfg.min_tp_dist:.2f}"
+                    )
 
                 if lg:
                     risk   = cur   - sl_px
