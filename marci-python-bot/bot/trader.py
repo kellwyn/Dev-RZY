@@ -75,7 +75,7 @@ def send_order(setup: TradeSetup, lots: float, cfg: StrategyConfig) -> bool:
         "tp":           setup.target,
         "deviation":    cfg.slippage,
         "magic":        cfg.magic,
-        "comment":      "Marci_MM_v1.02",
+        "comment":      "Marci_MM_v2.01",
         "type_time":    mt5.ORDER_TIME_GTC,
         "type_filling": mt5.ORDER_FILLING_IOC,
     }
@@ -121,7 +121,7 @@ def execute_setup(setup: TradeSetup, cfg: StrategyConfig):
     sep2 = "-" * 62
 
     print(f"\n{sep}")
-    print(f"  ═══ MARCI SILFRAIN — MEASURED MOVE v1.02 ═══")
+    print(f"  ═══ MARCI SILFRAIN — MEASURED MOVE v2.01 ═══")
     print(sep2)
     print(f"  Timezone         : {setup.session}")
     print(f"  Instrument       : {setup.symbol}  [{setup.timeframe}]")

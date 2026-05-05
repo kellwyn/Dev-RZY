@@ -924,7 +924,7 @@ def print_dashboard(setup: Optional[TradeSetup], cfg: StrategyConfig):
     sep = "─" * 62
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"\n{sep}")
-    print(f"  Marci Silfrain  —  Measured Move v1.02")
+    print(f"  Marci Silfrain  —  Measured Move v2.01")
     print(f"  Scan : {now}  |  {cfg.symbol} [{cfg.timeframe}]")
     print(sep)
 

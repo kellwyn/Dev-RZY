@@ -1,5 +1,5 @@
 """
-Historical replay engine for Marci Measured Move v1.02.
+Historical replay engine for Marci Measured Move v2.01.
 
 Pulls OHLCV data from MT5 via copy_rates_range, then steps through it
 bar-by-bar, injecting simulated ticks and bar windows into find_setup()

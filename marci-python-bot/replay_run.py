@@ -1,5 +1,5 @@
 """
-Replay CLI — Marci Measured Move v1.02
+Replay CLI — Marci Measured Move v2.01
 
 Feeds historical OHLCV bars from MT5 into the bot's strategy logic bar-by-bar.
 No real orders are placed. Outcomes are simulated from forward bar data.
@@ -67,7 +67,7 @@ def _str(key: str, default: str) -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Marci Measured Move Replay  v1.02",
+        description="Marci Measured Move Replay  v2.01",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--from",    dest="date_from", required=True,

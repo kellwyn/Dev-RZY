@@ -1,5 +1,5 @@
 """
-TradeSetup dataclass — v1.02 structure.
+TradeSetup dataclass — v2.01 structure.
 Carries every level needed to display the full summary and execute the order.
 """
 
