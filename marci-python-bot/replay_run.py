@@ -125,6 +125,7 @@ def main() -> None:
         minor_max_pips = _float("MINOR_MAX_PIPS", 5000.0),
         y_min_pct      = _float("Y_MIN_PCT",      25.0),
         tp_multiplier  = _float("TP_MULTIPLIER",  50.0),
+        min_tp_dist    = _float("MIN_TP_DIST",    1.0),
 
         min_impulse_pips = _float("MIN_IMPULSE_PIPS", 5.0),
         min_pullback_pct = _float("MIN_PULLBACK_PCT",  2.0),

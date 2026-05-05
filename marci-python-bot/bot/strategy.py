@@ -79,6 +79,7 @@ class StrategyConfig:
                                            #   XAUUSDp: 5000 pips = $50  — set per instrument
     y_min_pct:       float = 25.0          # R2 floor: minor dist >= this % of X move
     tp_multiplier:   float = 50.0          # % of mid→minor distance  e.g. 50 = 50%
+    min_tp_dist:     float = 1.0           # minimum reward distance (price units) — e.g. $1 for XAUUSD
 
     # Pullback gates
     min_impulse_pips: float = 5.0
@@ -769,11 +770,19 @@ def find_setup(
                 sl_opt2      = pb_px    + pip * 2.0
                 sl_px        = min(sl_opt1, sl_opt2)
 
-                risk   = sl_px - cur
-                reward = cur   - tp_px
-                rr     = round(reward / risk, 2) if (risk > 0 and reward > 0) else 0.0
+                if cur - tp_px < cfg.min_tp_dist:
+                    if _live:
+                        _scan_log.append(
+                            f"[SHORT] R✗  TP distance {cur - tp_px:.2f} < min {cfg.min_tp_dist:.2f} — skipping"
+                        )
+                    s = None
 
-                if rr >= cfg.min_rr:
+                if s:
+                    risk   = sl_px - cur
+                    reward = cur   - tp_px
+                    rr     = round(reward / risk, 2) if (risk > 0 and reward > 0) else 0.0
+
+                if s and rr >= cfg.min_rr:
                     lots = _calc_lots(cur, sl_px, cfg)
                     if _live:
                         _scan_log.append(
@@ -794,7 +803,7 @@ def find_setup(
                             s["peak_px"], s["minor_px"],
                             pb_px, midpoint, s["x_move_pct"], session),
                     )
-                elif _live:
+                elif _live and s:
                     _scan_log.append(f"[SHORT] RR {rr:.2f} < min {cfg.min_rr:.2f} — skipping")
         elif _live:
             _scan_log.append(
@@ -835,11 +844,19 @@ def find_setup(
                 sl_opt2  = pb_px    - pip * 2.0
                 sl_px    = max(sl_opt1, sl_opt2)
 
-                risk   = cur   - sl_px
-                reward = tp_px - cur
-                rr     = round(reward / risk, 2) if (risk > 0 and reward > 0) else 0.0
+                if tp_px - cur < cfg.min_tp_dist:
+                    if _live:
+                        _scan_log.append(
+                            f"[LONG]  R✗  TP distance {tp_px - cur:.2f} < min {cfg.min_tp_dist:.2f} — skipping"
+                        )
+                    lg = None
 
-                if rr >= cfg.min_rr:
+                if lg:
+                    risk   = cur   - sl_px
+                    reward = tp_px - cur
+                    rr     = round(reward / risk, 2) if (risk > 0 and reward > 0) else 0.0
+
+                if lg and rr >= cfg.min_rr:
                     lots = _calc_lots(cur, sl_px, cfg)
                     if _live:
                         _scan_log.append(
@@ -860,7 +877,7 @@ def find_setup(
                             lg["trough_px"], lg["minor_px"],
                             pb_px, midpoint, lg["x_move_pct"], session),
                     )
-                elif _live:
+                elif _live and lg:
                     _scan_log.append(f"[LONG]  RR {rr:.2f} < min {cfg.min_rr:.2f} — skipping")
         elif _live:
             _scan_log.append(

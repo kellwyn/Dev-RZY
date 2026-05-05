@@ -112,6 +112,7 @@ cfg = StrategyConfig(
     minor_max_pips = _float("MINOR_MAX_PIPS", 5000.0),  # R2 hard cap; XAUUSDp: 5000=~$50
     y_min_pct      = _float("Y_MIN_PCT",      25.0),    # R2 floor: minor >= % of X move
     tp_multiplier  = _float("TP_MULTIPLIER",  50.0),
+    min_tp_dist    = _float("MIN_TP_DIST",    1.0),
 
     # Pullback Strength Gates
     min_impulse_pips = _float("MIN_IMPULSE_PIPS", 5.0),

@@ -84,6 +84,7 @@ input double InpMinorMaxPips      = 5000.0; // Rule 2 hard cap: minor dist must 
                                             //   XAUUSDp: 5000 pips = $50  |  set per instrument
 input double InpYMinPct           = 25.0;   // Rule 2 floor: minor dist must be >= this % of X move
 input double InpTPMultiplier      = 50.0;   // TP = this% × (midpoint → minor point distance)  e.g. 50 = 50%
+input double InpMinTPDist         = 1.0;    // Minimum TP distance from entry (price units) — e.g. $1 for XAUUSD
 
 input group "=== Pullback Strength Gates ==="
 input double InpMinImpulsePips    = 5.0;    // Minimum impulse size (pips) — filters noise
@@ -314,6 +315,8 @@ void RunStrategy()
                 double reward = curPrice - tpPx;
                 double rr     = (risk > 0 && reward > 0) ? reward / risk : 0;
 
+                if(reward < InpMinTPDist) return;   // TP too close — degenerate geometry
+
                 if(rr >= InpMinRR)
                 {
                     double lots    = CalcLots(curPrice, slPx);
@@ -391,6 +394,7 @@ void RunStrategy()
             double risk   = curPrice - slPx;
             double reward = tpPx     - curPrice;
             if(risk <= 0 || reward <= 0) return;
+            if(reward < InpMinTPDist) return;       // TP too close — degenerate geometry
             double rr = reward / risk;
             if(rr < InpMinRR) return;
 
