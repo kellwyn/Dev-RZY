@@ -118,8 +118,9 @@ def main() -> None:
         max_lots       = _float("MAX_LOTS",        7.0),
 
         candle_count   = _int("CANDLE_COUNT",     20),
-        big_x_move_pct = _float("BIG_X_MOVE_PCT", 0.3),
-        y_max_pct      = _float("Y_MAX_PCT",      600.0),
+        big_x_move_pct = _float("BIG_X_MOVE_PCT", 0.1),
+        minor_max_pips = _float("MINOR_MAX_PIPS", 5000.0),
+        y_min_pct      = _float("Y_MIN_PCT",      25.0),
         tp_multiplier  = _float("TP_MULTIPLIER",  0.5),
 
         min_impulse_pips = _float("MIN_IMPULSE_PIPS", 5.0),
@@ -148,6 +149,7 @@ def main() -> None:
 
         max_zone_candles   = _int("MAX_ZONE_CANDLES",   3),
         max_structure_bars = _int("MAX_STRUCTURE_BARS", 5),
+        m1_structure_bars  = _int("M1_STRUCTURE_BARS",  10),
 
         magic    = _int("MAGIC_NUMBER", 20260412),
         slippage = _int("SLIPPAGE",     20),
