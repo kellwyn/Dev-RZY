@@ -151,8 +151,6 @@ int OnInit()
     Trade.SetExpertMagicNumber(InpMagicNumber);
     Trade.SetDeviationInPoints(InpSlippage);
 
-    if(InpYMaxPct > 90.0)
-        Print("WARN: InpYMaxPct capped at 90% of X move — adjusting at runtime");
 
     string mode = InpManualConfirm ? "MANUAL CONFIRM (live)" : "AUTO-EXECUTE (backtest)";
     Print("Marci MM v2.01 ready  |  ", _Symbol, "  ",
