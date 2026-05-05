@@ -49,7 +49,10 @@
 //|                                                                  |
 //|  v2.01  2026-04-28  — Rule changes                              |
 //|    · Rule 1: X% threshold lowered to 0.1% (InpBigXMovePct)     |
-//|    · Rule 2: Minor dist must be >= 25% of X move (InpYMinPct)   |
+//|    · Rule 2: Minor dist hard cap = InpMinorMaxPips pips          |
+//|              (replaces X%-relative cap; instrument-configurable) |
+//|              XAUUSDp default: 5000 pips = $50                    |
+//|              Minor dist floor >= 25% of X move (InpYMinPct)      |
 //|              M1 minor timing window expanded to 10 bars          |
 //|              (InpM1StructureBars); all other TFs stay 5 bars     |
 //|    · Rule 3: M1 pullback timing window expanded to 10 bars;      |
@@ -77,8 +80,9 @@ input group "=== Strategy Parameters ==="
 input int    InpCandleCount       = 20;     // Historical bars to analyse
 input double InpBigXMovePct       = 0.1;    // X% — impulse move size that defines the peak
                                             //   Forex: 1-2%  |  Indices: 2-4%  |  Crypto: 5%+
-input double InpYMaxPct           = 600.0;  // Y% max — max minor dist as % of X move (hard cap 90%)
-input double InpYMinPct           = 25.0;   // Y% min — minor dist must be >= this % of X move
+input double InpMinorMaxPips      = 5000.0; // Rule 2 hard cap: minor dist must not exceed N pips
+                                            //   XAUUSDp: 5000 pips = $50  |  set per instrument
+input double InpYMinPct           = 25.0;   // Rule 2 floor: minor dist must be >= this % of X move
 input double InpTPMultiplier      = 0.5;    // TP = this% × (midpoint → minor point distance)
 
 input group "=== Pullback Strength Gates ==="
@@ -262,9 +266,8 @@ void RunStrategy()
     if(IsPostTPCooldown(closes)) return;
 
     double pipVal    = ((_Digits == 5 || _Digits == 3) ? _Point * 10.0 : _Point);
-    double yMaxPct   = MathMin(InpYMaxPct, 90.0);  // hard cap
     // Rule 2-3: M1 uses wider timing window than higher timeframes
-    int    structBars = (Period() == PERIOD_M1) ? InpM1StructureBars : InpMaxStructureBars;
+    int structBars = (Period() == PERIOD_M1) ? InpM1StructureBars : InpMaxStructureBars;
 
     bool shortFired = false;
 
@@ -282,7 +285,7 @@ void RunStrategy()
 
         bool shortFound = FindShortSetup(highs, lows, opens, closes,
                                           InpCandleCount, InpBigXMovePct,
-                                          yMaxPct, InpYMinPct,
+                                          InpMinorMaxPips, InpYMinPct,
                                           InpMinPullbackPct, InpMaxPullbackPct,
                                           pipVal, InpMinImpulsePips, structBars,
                                           peakBar, peakPx, minorBar, minorPx, pbBar, pbPx);
@@ -361,7 +364,7 @@ void RunStrategy()
 
         bool longFound = FindLongSetup(highs, lows, opens, closes,
                                         InpCandleCount, InpBigXMovePct,
-                                        yMaxPct, InpYMinPct,
+                                        InpMinorMaxPips, InpYMinPct,
                                         InpMinPullbackPct, InpMaxPullbackPct,
                                         pipVal, InpMinImpulsePips, structBars,
                                         troughBar, troughPx, minorBar, minorPx, pbBar, pbPx);
@@ -451,7 +454,7 @@ void RunStrategy()
 bool FindShortSetup(
     const double &highs[], const double &lows[],
     const double &opens[], const double &closes[],
-    int bars, double xPct, double yMaxPct, double yMinPct,
+    int bars, double xPct, double minorMaxPips, double yMinPct,
     double minPbPct, double maxPbPct,
     double pipVal, double minImpPips, int maxStructBars,
     int &peakBar, double &peakPx,
@@ -508,8 +511,8 @@ bool FindShortSetup(
         //── Step 4: Y% gate (min and max) ───────────────────────────
         double mnDist = pkPx - mnPx;
         if(mnDist <= 0) continue;
-        if(mnDist > (yMaxPct / 100.0) * xMove) continue;   // too large — not a minor move
-        if(mnDist < (yMinPct / 100.0) * xMove) continue;   // too small — not a meaningful drop
+        if(pipVal > 0 && mnDist > minorMaxPips * pipVal) continue;  // hard pip cap — instrument-configurable
+        if(mnDist < (yMinPct / 100.0) * xMove) continue;            // floor — must be >= % of X move
 
         //── Step 5: Pullback depth ───────────────────────────────────
         double pbDepth = (pbPx_c - mnPx) / (pkPx - mnPx) * 100.0;
@@ -550,7 +553,7 @@ bool FindShortSetup(
 bool FindLongSetup(
     const double &highs[], const double &lows[],
     const double &opens[], const double &closes[],
-    int bars, double xPct, double yMaxPct, double yMinPct,
+    int bars, double xPct, double minorMaxPips, double yMinPct,
     double minPbPct, double maxPbPct,
     double pipVal, double minImpPips, int maxStructBars,
     int &troughBar, double &troughPx,
@@ -602,8 +605,8 @@ bool FindLongSetup(
         //── Step 4: Y% gate (min and max) ───────────────────────────
         double mnDist = mnPx - trPx;
         if(mnDist <= 0) continue;
-        if(mnDist > (yMaxPct / 100.0) * xMove) continue;   // too large — not a minor move
-        if(mnDist < (yMinPct / 100.0) * xMove) continue;   // too small — not a meaningful rise
+        if(pipVal > 0 && mnDist > minorMaxPips * pipVal) continue;  // hard pip cap — instrument-configurable
+        if(mnDist < (yMinPct / 100.0) * xMove) continue;            // floor — must be >= % of X move
 
         //── Step 5: Pullback depth ───────────────────────────────────
         double pbDepth = (mnPx - pbPx_c) / (mnPx - trPx) * 100.0;
