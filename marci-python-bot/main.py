@@ -56,20 +56,22 @@ _args = _parser.parse_args()
 
 if _args.profile:
     key = _args.profile.upper().replace("-", "_")
-    sym  = os.getenv(f"PROFILE_{key}_SYMBOL")
-    path = os.getenv(f"PROFILE_{key}_MT5_PATH")
+    sym      = os.getenv(f"PROFILE_{key}_SYMBOL")
+    path     = os.getenv(f"PROFILE_{key}_MT5_PATH")
     login    = os.getenv(f"PROFILE_{key}_MT5_LOGIN")
     password = os.getenv(f"PROFILE_{key}_MT5_PASSWORD")
     server   = os.getenv(f"PROFILE_{key}_MT5_SERVER")
+    magic    = os.getenv(f"PROFILE_{key}_MAGIC_NUMBER")
     if sym is None:
         print(f"  ERROR: profile '{_args.profile}' not found in .env "
               f"(expected PROFILE_{key}_SYMBOL)")
         sys.exit(1)
-    if sym:      os.environ["SYMBOL"]       = sym
-    if path:     os.environ["MT5_PATH"]     = path
-    if login:    os.environ["MT5_LOGIN"]    = login
-    if password: os.environ["MT5_PASSWORD"] = password
-    if server:   os.environ["MT5_SERVER"]   = server
+    if sym:      os.environ["SYMBOL"]        = sym
+    if path:     os.environ["MT5_PATH"]      = path
+    if login:    os.environ["MT5_LOGIN"]     = login
+    if password: os.environ["MT5_PASSWORD"]  = password
+    if server:   os.environ["MT5_SERVER"]    = server
+    if magic:    os.environ["MAGIC_NUMBER"]  = magic
 
 # --symbol always wins over profile / .env
 if _args.symbol:
