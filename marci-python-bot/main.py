@@ -20,6 +20,7 @@ import argparse
 import os
 import sys
 import time
+from pathlib import Path
 from dotenv import load_dotenv
 
 # Force UTF-8 output so box-drawing characters render on Windows consoles
@@ -32,7 +33,12 @@ from bot.connection import connect, disconnect
 from bot.strategy   import StrategyConfig, find_setup, print_dashboard, setup_logging
 from bot.trader     import execute_setup
 
-load_dotenv()
+_here = Path(__file__).parent
+# Load root .env first (strategy params), then local .env (symbol/connection overrides).
+# override=True on both so file contents always win over stale injected env vars
+# (e.g. VSCode python.terminal.useEnvFile from an older terminal session).
+load_dotenv(_here.parent / ".env", override=True)  # root: strategy params
+load_dotenv(_here / ".env",        override=True)  # local: symbol/connection overrides
 
 # ── CLI arguments ─────────────────────────────────────────────────────────────
 
